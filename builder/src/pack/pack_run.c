@@ -32,7 +32,8 @@ typedef struct img2bin_pack_cli_s {
   long index_interval;
   int split;
   const char *base_name;
-  int no_codegen;
+  const char *folders;
+  int emit;
   int show_help;
   int show_info;
 } img2bin_pack_cli_t;
@@ -103,10 +104,12 @@ static void img2bin_pack_print_help(void)
   printf("  --little-endian         Default to little-endian output\n");
   printf("  --bg-color <RRGGBB>     Default background color (default: 000000)\n");
   printf("  --index-interval <n>    Default index interval for index-capable tools\n");
+  printf("  --folders <a,b,...>     Only process the named folders (default: all input2* folders)\n");
+  printf("  --emit <bin|ch>         bin: only .bin files; ch: .bin plus generated .c/.h (default: ch)\n");
   printf("  --combined              Generate one .c/.h pair for all resources (default)\n");
   printf("  --split                 Generate one .c/.h pair per .bin file\n");
   printf("  --name <base>           Base name for combined output (default: img_resources)\n");
-  printf("  --no-codegen            Only run the tools, do not generate .c/.h\n");
+  printf("  --no-codegen            Same as --emit bin\n");
   printf("  --help                  Show this help\n");
   printf("  --info                  Print machine-readable tool metadata as JSON\n");
   printf("\n");
@@ -170,6 +173,8 @@ int img2bin_pack_get_info_json(char *buffer, size_t buffer_size)
     "      { \"name\": \"little_endian\", \"flag\": \"--little-endian\", \"type\": \"boolean_flag\" },\n"
     "      { \"name\": \"bg_color\", \"flag\": \"--bg-color\", \"type\": \"hex_rgb\" },\n"
     "      { \"name\": \"index_interval\", \"flag\": \"--index-interval\", \"type\": \"positive_integer\" },\n"
+    "      { \"name\": \"folders\", \"flag\": \"--folders\", \"type\": \"csv\" },\n"
+    "      { \"name\": \"emit\", \"flag\": \"--emit\", \"type\": \"enum:bin|ch\" },\n"
     "      { \"name\": \"combined\", \"flag\": \"--combined\", \"type\": \"boolean_flag\" },\n"
     "      { \"name\": \"split\", \"flag\": \"--split\", \"type\": \"boolean_flag\" },\n"
     "      { \"name\": \"name\", \"flag\": \"--name\", \"type\": \"identifier\" },\n"
@@ -206,6 +211,7 @@ static int img2bin_pack_parse_cli(
   memset(cli, 0, sizeof(*cli));
   cli->index_interval = -1;
   cli->split = -1;
+  cli->emit = -1;
 
   for (index = 1; index < argc; ++index) {
     arg = argv[index];
@@ -231,13 +237,14 @@ static int img2bin_pack_parse_cli(
       continue;
     }
     if (strcmp(arg, "--no-codegen") == 0) {
-      cli->no_codegen = 1;
+      cli->emit = 0;
       continue;
     }
 
     if (strcmp(arg, "--root") == 0 || strcmp(arg, "--config") == 0 || strcmp(arg, "--output") == 0 ||
         strcmp(arg, "--tools") == 0 || strcmp(arg, "--format") == 0 || strcmp(arg, "--formats") == 0 ||
-        strcmp(arg, "--bg-color") == 0 || strcmp(arg, "--index-interval") == 0 || strcmp(arg, "--name") == 0) {
+        strcmp(arg, "--bg-color") == 0 || strcmp(arg, "--index-interval") == 0 || strcmp(arg, "--name") == 0 ||
+        strcmp(arg, "--folders") == 0 || strcmp(arg, "--emit") == 0) {
       if (index + 1 >= argc) {
         img2bin_set_error(error_buffer, error_buffer_size, "Missing value for %s.", arg);
         return 0;
@@ -267,6 +274,17 @@ static int img2bin_pack_parse_cli(
           return 0;
         }
         cli->index_interval = parsed;
+      } else if (strcmp(arg, "--folders") == 0) {
+        cli->folders = argv[index];
+      } else if (strcmp(arg, "--emit") == 0) {
+        if (img2bin_stricmp(argv[index], "bin") == 0) {
+          cli->emit = 0;
+        } else if (img2bin_stricmp(argv[index], "ch") == 0 || img2bin_stricmp(argv[index], "both") == 0) {
+          cli->emit = 1;
+        } else {
+          img2bin_set_error(error_buffer, error_buffer_size, "--emit expects bin or ch, got: %s", argv[index]);
+          return 0;
+        }
       } else {
         cli->base_name = argv[index];
       }
@@ -278,6 +296,45 @@ static int img2bin_pack_parse_cli(
   }
 
   return 1;
+}
+
+static int img2bin_pack_csv_next(const char **cursor, char *buffer, size_t buffer_size)
+{
+  const char *start = *cursor;
+  const char *end = NULL;
+  size_t length = 0;
+
+  if (start == NULL || *start == '\0') {
+    return 0;
+  }
+
+  end = strchr(start, ',');
+  length = end != NULL ? (size_t)(end - start) : strlen(start);
+  if (length >= buffer_size) {
+    length = buffer_size - 1;
+  }
+  if (length > 0) {
+    memcpy(buffer, start, length);
+  }
+  buffer[length] = '\0';
+  *cursor = end != NULL ? end + 1 : start + strlen(start);
+  return 1;
+}
+
+static int img2bin_pack_csv_contains(const char *csv, const char *name)
+{
+  const char *cursor = csv;
+  char segment[256];
+
+  if (csv == NULL) {
+    return 1;
+  }
+  while (img2bin_pack_csv_next(&cursor, segment, sizeof(segment))) {
+    if (segment[0] != '\0' && img2bin_stricmp(segment, name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 static img2bin_pack_job_t *img2bin_pack_add_job(img2bin_pack_context_t *context, const char *folder_name)
@@ -355,7 +412,7 @@ static void img2bin_pack_prepare_job(img2bin_pack_context_t *context, img2bin_pa
 
   if (!img2bin_is_directory(job->input_directory)) {
     job->status = "error";
-    img2bin_pack_copy_string(job->detail, sizeof(job->detail), "Configured folder does not exist.");
+    img2bin_pack_copy_string(job->detail, sizeof(job->detail), "Input folder does not exist.");
     return;
   }
 
@@ -698,18 +755,73 @@ oom:
   return 0;
 }
 
-static int img2bin_pack_run_codegen(img2bin_pack_context_t *context, char *error_buffer, size_t error_buffer_size)
+static int img2bin_pack_codegen_directory(
+  img2bin_pack_context_t *context,
+  const char *directory,
+  const img2bin_pack_codegen_options_t *options,
+  char *error_buffer,
+  size_t error_buffer_size)
 {
-  img2bin_pack_codegen_options_t options;
   img2bin_string_list_t bin_paths;
   img2bin_string_list_t names;
   char joined_path[IMG2BIN_PATH_CAPACITY];
+  size_t name_index = 0;
+  size_t generated_before = 0;
+
+  memset(&bin_paths, 0, sizeof(bin_paths));
+  memset(&names, 0, sizeof(names));
+
+  if (!img2bin_pack_list_directory(directory, 1, 0, &names, error_buffer, error_buffer_size)) {
+    img2bin_string_list_free(&names);
+    return 0;
+  }
+
+  for (name_index = 0; name_index < names.count; ++name_index) {
+    img2bin_pack_bin_info_t info;
+    if (!img2bin_pack_ends_with_ci(names.items[name_index], ".bin")) {
+      continue;
+    }
+    if (!img2bin_pack_parse_bin_name(names.items[name_index], &info)) {
+      continue;
+    }
+    if (!img2bin_path_join(directory, names.items[name_index], joined_path, sizeof(joined_path)) ||
+        !img2bin_string_list_append(&bin_paths, joined_path)) {
+      img2bin_string_list_free(&names);
+      img2bin_string_list_free(&bin_paths);
+      img2bin_set_error(error_buffer, error_buffer_size, "Failed to collect .bin files for code generation.");
+      return 0;
+    }
+  }
+  img2bin_string_list_free(&names);
+
+  if (bin_paths.count == 0) {
+    img2bin_string_list_free(&bin_paths);
+    return 1;
+  }
+
+  generated_before = context->generated_files.count;
+  if (!img2bin_pack_generate_sources(&bin_paths, directory, options, &context->generated_files, error_buffer, error_buffer_size)) {
+    img2bin_string_list_free(&bin_paths);
+    return 0;
+  }
+  img2bin_string_list_free(&bin_paths);
+
+  while (generated_before < context->generated_files.count) {
+    printf("Generated %s\n", context->generated_files.items[generated_before]);
+    ++generated_before;
+  }
+
+  return 1;
+}
+
+static int img2bin_pack_run_codegen(img2bin_pack_context_t *context, char *error_buffer, size_t error_buffer_size)
+{
+  img2bin_pack_codegen_options_t options;
   size_t job_index = 0;
   size_t other_index = 0;
-  size_t name_index = 0;
   const img2bin_pack_job_t *job = NULL;
   int seen_before = 0;
-  size_t generated_before = 0;
+  int processed_any = 0;
 
   img2bin_pack_codegen_options_init(&options);
   options.split = context->codegen_split;
@@ -733,48 +845,17 @@ static int img2bin_pack_run_codegen(img2bin_pack_context_t *context, char *error
       continue;
     }
 
-    memset(&bin_paths, 0, sizeof(bin_paths));
-    memset(&names, 0, sizeof(names));
-
-    if (!img2bin_pack_list_directory(job->output_directory, 1, 0, &names, error_buffer, error_buffer_size)) {
-      img2bin_string_list_free(&names);
+    if (!img2bin_pack_codegen_directory(context, job->output_directory, &options, error_buffer, error_buffer_size)) {
       return 0;
     }
+    processed_any = 1;
+  }
 
-    for (name_index = 0; name_index < names.count; ++name_index) {
-      img2bin_pack_bin_info_t info;
-      if (!img2bin_pack_ends_with_ci(names.items[name_index], ".bin")) {
-        continue;
-      }
-      if (!img2bin_pack_parse_bin_name(names.items[name_index], &info)) {
-        continue;
-      }
-      if (!img2bin_path_join(job->output_directory, names.items[name_index], joined_path, sizeof(joined_path)) ||
-          !img2bin_string_list_append(&bin_paths, joined_path)) {
-        img2bin_string_list_free(&names);
-        img2bin_string_list_free(&bin_paths);
-        img2bin_set_error(error_buffer, error_buffer_size, "Failed to collect .bin files for code generation.");
-        return 0;
-      }
-    }
-    img2bin_string_list_free(&names);
-
-    if (bin_paths.count == 0) {
-      img2bin_string_list_free(&bin_paths);
-      continue;
-    }
-
-    generated_before = context->generated_files.count;
-    if (!img2bin_pack_generate_sources(&bin_paths, job->output_directory, &options, &context->generated_files, error_buffer, error_buffer_size)) {
-      img2bin_string_list_free(&bin_paths);
-      return 0;
-    }
-    img2bin_string_list_free(&bin_paths);
-
-    while (generated_before < context->generated_files.count) {
-      printf("Generated %s\n", context->generated_files.items[generated_before]);
-      ++generated_before;
-    }
+  /* No folder produced new bins this run: still regenerate from whatever the
+     default output directory holds, so an --emit ch pass at the end of a
+     multi-invocation batch always refreshes the combined sources. */
+  if (!processed_any && img2bin_is_directory(context->output)) {
+    return img2bin_pack_codegen_directory(context, context->output, &options, error_buffer, error_buffer_size);
   }
 
   return 1;
@@ -798,6 +879,8 @@ static int img2bin_pack_execute(const img2bin_pack_cli_t *cli, const char *exe_d
   size_t partial = 0;
   size_t skipped = 0;
   const char *config_used = NULL;
+  const char *folders_cursor = NULL;
+  char folder_segment[256];
   img2bin_pack_job_t *job = NULL;
   int exit_code = IMG2BIN_PACK_EXIT_INTERNAL_ERROR;
 
@@ -871,8 +954,10 @@ static int img2bin_pack_execute(const img2bin_pack_cli_t *cli, const char *exe_d
   if (cli->base_name != NULL) {
     img2bin_pack_copy_string(config->codegen_base_name, sizeof(config->codegen_base_name), cli->base_name);
   }
-  if (cli->no_codegen) {
+  if (cli->emit == 0) {
     config->codegen_enabled = 0;
+  } else if (cli->emit == 1) {
+    config->codegen_enabled = 1;
   }
 
   if (cli->root != NULL) {
@@ -968,6 +1053,9 @@ static int img2bin_pack_execute(const img2bin_pack_cli_t *cli, const char *exe_d
       continue;
     }
     ++scanned_input_folders;
+    if (!img2bin_pack_csv_contains(cli->folders, folder_names.items[index])) {
+      continue;
+    }
     if (img2bin_pack_add_job(&context, folder_names.items[index]) == NULL) {
       printf("Too many input folders; only the first %d are processed.\n", IMG2BIN_PACK_MAX_JOBS);
       break;
@@ -975,6 +1063,9 @@ static int img2bin_pack_execute(const img2bin_pack_cli_t *cli, const char *exe_d
   }
 
   for (index = 0; index < config->folder_rule_count; ++index) {
+    if (!img2bin_pack_csv_contains(cli->folders, config->folder_rules[index].folder_name)) {
+      continue;
+    }
     if (img2bin_pack_find_job(&context, config->folder_rules[index].folder_name) != NULL) {
       continue;
     }
@@ -984,7 +1075,20 @@ static int img2bin_pack_execute(const img2bin_pack_cli_t *cli, const char *exe_d
     }
   }
 
-  if (scanned_input_folders == 0 && context.job_count == 0) {
+  if (cli->folders != NULL) {
+    folders_cursor = cli->folders;
+    while (img2bin_pack_csv_next(&folders_cursor, folder_segment, sizeof(folder_segment))) {
+      if (folder_segment[0] == '\0' || img2bin_pack_find_job(&context, folder_segment) != NULL) {
+        continue;
+      }
+      if (img2bin_pack_add_job(&context, folder_segment) == NULL) {
+        printf("Too many input folders; only the first %d are processed.\n", IMG2BIN_PACK_MAX_JOBS);
+        break;
+      }
+    }
+  }
+
+  if (cli->folders == NULL && scanned_input_folders == 0 && context.job_count == 0) {
     if (!img2bin_pack_bootstrap_folders(&context)) {
       exit_code = IMG2BIN_PACK_EXIT_INPUT_ERROR;
       goto cleanup;

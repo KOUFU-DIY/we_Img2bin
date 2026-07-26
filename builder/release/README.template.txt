@@ -79,9 +79,11 @@ img2bin tools __VERSION_TEXT__
 - 统筹管理器（在发布目录根下执行）:
   windows\img2bin_pack.exe
   windows\img2bin_pack.exe --format argb8888
+  windows\img2bin_pack.exe --folders input2raw,input2qoi --format rgb565
+  windows\img2bin_pack.exe --emit bin
   windows\img2bin_pack.exe --split
-  windows\img2bin_pack.exe --no-codegen
   windows\img2bin_pack.exe --info
+  更多预设见 windows\examples\ 下的 batch_*.cmd
 
 - 单个工具（在 windows\tools 下执行）:
   img2bin_raw.exe --format rgb565

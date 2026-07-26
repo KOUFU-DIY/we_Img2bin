@@ -141,12 +141,67 @@ const unsigned char demo1_rgb565_raw_be_128x64[16384] = {
 | `--little-endian` | 默认小端 |
 | `--bg-color <RRGGBB>` | 默认背景色 |
 | `--index-interval <n>` | 默认索引间隔 |
+| `--folders <a,b,...>` | 只处理列出的文件夹（逗号分隔；默认处理全部 `input2*`） |
+| `--emit <bin\|ch>` | `bin` 只出 `.bin`；`ch` 出 `.bin` + `.c/.h`（默认 `ch`） |
 | `--combined` / `--split` | 生成模式 |
 | `--name <基名>` | 合并模式基名 |
-| `--no-codegen` | 只转换，不生成 `.c/.h` |
+| `--no-codegen` | 等价 `--emit bin` |
 | `--help` / `--info` | 帮助 / 机器可读元数据 |
 
 命令行参数优先于配置文件，配置文件优先于内置默认值。
+
+## 批处理脚本（bat）模式
+
+不想用配置文件时，可以完全用 bat 驱动：每行一组文件夹 + 一组参数。
+`windows\examples\` 里有现成预设：
+
+| 脚本 | 作用 |
+| --- | --- |
+| `run_batch.cmd` | 全量默认处理（等价双击 exe） |
+| `batch_bin_only.cmd` | 全部只出 `.bin`，不生成 `.c/.h` |
+| `batch_by_group.cmd` | 分批不同参数：raw 系转 rgb565、QOI 系转 argb8888 |
+| `batch_merged_pack.cmd` | 取模后用独立的 bin2c 合并成单一资源包 |
+
+分批写法示例：
+
+```bat
+"%PACK%" --root "%ROOT%" --folders input2raw,input2rle --format rgb565 --emit bin
+"%PACK%" --root "%ROOT%" --folders input2qoi,input2indexqoi --format argb8888 --emit ch
+```
+
+要点：
+
+- codegen 扫描的是输出目录里**全部**合规 `.bin`，所以只需最后一行带 `--emit ch`，
+  前面各批的资源都会进同一份 `img_resources.c/.h`
+- `--emit ch` 的那次运行即使没有新转换任何图片，也会按输出目录现状重新生成 `.c/.h`
+- `--folders` 里写了不存在的文件夹名会按失败处理（退出码 6），bat 里拼写错误能立刻暴露
+- 输出目录是累积的：换格式重转前如需干净结果，先清空 `output\`
+
+## 与 bin2c 配合（合并资源包）
+
+独立的 `bin2c` 工具（合并多个 `.bin` 为单一资源包 + ID 枚举 + 地址表）可以直接
+消费本管理器的输出——`output\` 里就是一堆规范命名的 `.bin`：
+
+```bat
+img2bin_pack.exe --root .. --emit bin
+bin2c.exe --input ..\output --output-path ..\output\merged --output-name res_pack
+```
+
+两种 `.c/.h` 模型的区别：
+
+| | pack 内置 codegen | bin2c |
+| --- | --- | --- |
+| 形态 | 每张图一个命名数组 | 单一大数组 / 合并 bin + 地址表 |
+| 引用方式 | 按符号名直接引用 | 按 ID 枚举查 `bin_addr_table` |
+| 典型场景 | 资源编进固件、直接取用 | 外挂 Flash 烧写资源包、按偏移读取 |
+
+注意：
+
+- 两边符号都源自同一 `.bin` 文件名，`XXX_SIZE` 等宏会重复定义，
+  下位机 **二选一 include**（`img_resources.h` 或 `res_pack.h`），不要同时包含
+- bin2c 的输出要放到子目录（如 `output\merged\`），否则重复运行时会把上次的
+  合并包自己也合并进去
+- 预设脚本 `batch_merged_pack.cmd` 已按以上规则写好，改一下开头的 `BIN2C` 路径即可用
 
 ## 工具自动发现
 

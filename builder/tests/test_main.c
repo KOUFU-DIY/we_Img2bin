@@ -2221,6 +2221,75 @@ static void test_pack_end_to_end(void)
   free(text);
 }
 
+static void test_pack_folder_selection_and_emit(void)
+{
+  char stage[IMG2BIN_PATH_CAPACITY];
+  char binary_dir[IMG2BIN_PATH_CAPACITY];
+  char folder[IMG2BIN_PATH_CAPACITY];
+  char fixture[IMG2BIN_PATH_CAPACITY];
+  char output_dir[IMG2BIN_PATH_CAPACITY];
+  char expected_file[IMG2BIN_PATH_CAPACITY];
+  char pack_exe[IMG2BIN_PATH_CAPACITY];
+  char error[512];
+  char *text = NULL;
+  const char *argv[11];
+  int exit_code = -1;
+  const unsigned char pixels[4] = { 128, 64, 32, 255 };
+
+  test_make_stage_directory("pack_select", stage, sizeof(stage));
+  test_get_binary_directory(binary_dir, sizeof(binary_dir));
+
+  TEST_ASSERT(img2bin_path_join(stage, "input2raw", folder, sizeof(folder)), "Could not compose selection input2raw path.");
+  TEST_ASSERT(img2bin_make_dirs(folder, error, sizeof(error)), error);
+  TEST_ASSERT(img2bin_path_join(folder, "pick.png", fixture, sizeof(fixture)), "Could not compose selection fixture path.");
+  test_write_rgba_fixture(fixture, 1, 1, pixels);
+
+  TEST_ASSERT(img2bin_path_join(stage, "input2qoi", folder, sizeof(folder)), "Could not compose selection input2qoi path.");
+  TEST_ASSERT(img2bin_make_dirs(folder, error, sizeof(error)), error);
+  TEST_ASSERT(img2bin_path_join(folder, "pick.png", fixture, sizeof(fixture)), "Could not compose selection qoi fixture path.");
+  test_write_rgba_fixture(fixture, 1, 1, pixels);
+
+#ifdef _WIN32
+  TEST_ASSERT(img2bin_path_join(binary_dir, "img2bin_pack.exe", pack_exe, sizeof(pack_exe)), "Could not compose selection pack exe path.");
+#else
+  TEST_ASSERT(img2bin_path_join(binary_dir, "img2bin_pack", pack_exe, sizeof(pack_exe)), "Could not compose selection pack exe path.");
+#endif
+
+  argv[0] = "img2bin_pack";
+  argv[1] = "--root";
+  argv[2] = stage;
+  argv[3] = "--tools";
+  argv[4] = binary_dir;
+  argv[5] = "--folders";
+  argv[6] = "input2raw";
+  argv[7] = "--emit";
+  argv[8] = "bin";
+
+  exit_code = img2bin_pack_run_with_executable_path(9, argv, pack_exe);
+  TEST_ASSERT(exit_code == 0, "Pack selective run should succeed.");
+
+  TEST_ASSERT(img2bin_path_join(stage, "output", output_dir, sizeof(output_dir)), "Could not compose selection output path.");
+  TEST_ASSERT(img2bin_path_join(output_dir, "pick_rgb565_raw_be_1x1.bin", expected_file, sizeof(expected_file)), "Could not compose selected bin path.");
+  TEST_ASSERT(img2bin_is_regular_file(expected_file), "Selected folder was not processed.");
+  TEST_ASSERT(img2bin_path_join(output_dir, "pick_rgb565_qoi_be_1x1.bin", expected_file, sizeof(expected_file)), "Could not compose unselected bin path.");
+  TEST_ASSERT(!img2bin_is_regular_file(expected_file), "Unselected folder must not be processed.");
+  TEST_ASSERT(img2bin_path_join(output_dir, "img_resources.h", expected_file, sizeof(expected_file)), "Could not compose emit header path.");
+  TEST_ASSERT(!img2bin_is_regular_file(expected_file), "--emit bin must not generate .c/.h.");
+
+  TEST_ASSERT(img2bin_path_join(output_dir, "img2bin_pack-manifest.json", expected_file, sizeof(expected_file)), "Could not compose selection manifest path.");
+  text = test_read_text_file(expected_file);
+  TEST_ASSERT(text != NULL, "Selective run did not write a manifest.");
+  TEST_ASSERT(strstr(text, "\"folder\": \"input2raw\"") != NULL, "Selection manifest is missing the chosen folder.");
+  TEST_ASSERT(strstr(text, "\"folder\": \"input2qoi\"") == NULL, "Selection manifest must not contain unselected folders.");
+  TEST_ASSERT(strstr(text, "\"enabled\": false") != NULL, "Selection manifest should record codegen disabled.");
+  free(text);
+
+  argv[5] = "--folders";
+  argv[6] = "input2nothere";
+  exit_code = img2bin_pack_run_with_executable_path(9, argv, pack_exe);
+  TEST_ASSERT(exit_code == 6, "Naming a missing folder in --folders must fail the run.");
+}
+
 #ifdef _WIN32
 static void test_windows_icon_resource_for_executable(const char *exe_name)
 {
@@ -2327,6 +2396,7 @@ int main(void)
   test_pack_info_json();
   test_pack_discovery_finds_tools();
   test_pack_end_to_end();
+  test_pack_folder_selection_and_emit();
 #ifdef _WIN32
   test_windows_icon_resource_for_executable("img2bin_raw.exe");
   test_windows_icon_resource_for_executable("img2bin_imprle.exe");
