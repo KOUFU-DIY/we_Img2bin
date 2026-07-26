@@ -1,9 +1,14 @@
+﻿param(
+  [switch]$SkipTests
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Resolve-ExistingPath {
   param(
     [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
     [string[]]$Candidates
   )
 
@@ -18,6 +23,33 @@ function Resolve-ExistingPath {
   }
 
   return $null
+}
+
+function Get-VisualStudioRoots {
+  $roots = @()
+
+  $vswhere = Resolve-ExistingPath @(
+    'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe',
+    'C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe'
+  )
+  if ($null -ne $vswhere) {
+    try {
+      $found = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+      if ($null -ne $found) {
+        $roots += @($found)
+      }
+    } catch {
+    }
+  }
+
+  foreach ($drive in @('C:', 'D:', 'E:')) {
+    foreach ($edition in @('BuildTools', 'Community', 'Professional', 'Enterprise')) {
+      $roots += "$drive\Program Files (x86)\Microsoft Visual Studio\2022\$edition"
+      $roots += "$drive\Program Files\Microsoft Visual Studio\2022\$edition"
+    }
+  }
+
+  return $roots | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
 }
 
 function Get-VersionMacroValue {
@@ -49,6 +81,7 @@ function Fail-WithMessage {
 $repoRoot = Split-Path -Parent $PSCommandPath
 $builderDir = Join-Path $repoRoot 'builder'
 $userDocsSourceDir = Join-Path $repoRoot 'docs\user'
+$windowsDir = Join-Path $repoRoot 'windows'
 $versionHeader = Join-Path $builderDir 'src\core\version.h'
 $readmeTemplatePath = Join-Path $builderDir 'release\README.template.txt'
 
@@ -64,102 +97,91 @@ if (!(Test-Path -LiteralPath $readmeTemplatePath)) {
 if (!(Test-Path -LiteralPath $userDocsSourceDir)) {
   Fail-WithMessage '未找到用户文档目录 docs\user。'
 }
+if (!(Test-Path -LiteralPath (Join-Path $windowsDir 'img2bin_pack.json'))) {
+  Fail-WithMessage '未找到 windows\img2bin_pack.json 默认配置。'
+}
+if (!(Test-Path -LiteralPath (Join-Path $windowsDir 'examples'))) {
+  Fail-WithMessage '未找到 windows\examples 示例目录。'
+}
 
-$vsDevCmd = Resolve-ExistingPath @(
-  'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat',
-  'C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat',
-  'C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat',
-  'C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat'
-)
+$vsRoots = @(Get-VisualStudioRoots)
+if ($vsRoots.Count -eq 0) {
+  Fail-WithMessage '未找到 Visual Studio 2022（含 C++ 构建组件），请先安装 VS Build Tools 或 Community。'
+}
+
+$vsDevCmd = Resolve-ExistingPath @($vsRoots | ForEach-Object { Join-Path $_ 'Common7\Tools\VsDevCmd.bat' })
 if ($null -eq $vsDevCmd) {
-  Fail-WithMessage '未找到 Visual Studio Build Tools 的 VsDevCmd.bat，请先安装 VS Build Tools 2022 的 C++ 构建组件。'
+  Fail-WithMessage '未找到 VsDevCmd.bat，请确认 Visual Studio 安装完整。'
 }
 
-$cmake = Resolve-ExistingPath @(
-  'C:\Program Files\CMake\bin\cmake.exe',
-  'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe',
-  'C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe',
-  'C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe',
-  'C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
-)
+$cmake = Resolve-ExistingPath (@(
+  'C:\Program Files\CMake\bin\cmake.exe'
+) + ($vsRoots | ForEach-Object { Join-Path $_ 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' }))
 if ($null -eq $cmake) {
-  Fail-WithMessage '未找到 cmake.exe，请先安装 CMake。'
+  Fail-WithMessage '未找到 cmake.exe，请先安装 CMake 或 Visual Studio 自带的 CMake 组件。'
 }
 
-$ninja = Resolve-ExistingPath @(
-  'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe',
-  'C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe',
-  'C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe',
-  'C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe',
+$ninja = Resolve-ExistingPath (@(
   'C:\Program Files\Ninja\ninja.exe'
-)
+) + ($vsRoots | ForEach-Object { Join-Path $_ 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe' }))
 if ($null -eq $ninja) {
   Fail-WithMessage '未找到 ninja.exe，请先安装 Ninja 或 Visual Studio 自带的 Ninja 组件。'
 }
 
 $ctest = Join-Path (Split-Path -Parent $cmake) 'ctest.exe'
 if (!(Test-Path -LiteralPath $ctest)) {
-  $ctest = Resolve-ExistingPath @(
-    'C:\Program Files\CMake\bin\ctest.exe',
-    'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe',
-    'C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe',
-    'C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe',
-    'C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe'
-  )
-}
-if ($null -eq $ctest) {
   Fail-WithMessage '未找到 ctest.exe，请确认 CMake 安装完整。'
 }
 
 $versionText = Get-VersionMacroValue -HeaderPath $versionHeader -MacroName 'IMG2BIN_VERSION_TEXT'
 $versionSemver = Get-VersionMacroValue -HeaderPath $versionHeader -MacroName 'IMG2BIN_VERSION_SEMVER'
 
+$toolNames = @('raw', 'imprle', 'rle', 'qoi', 'qoif', 'indexqoi')
+$inputFolderNames = $toolNames | ForEach-Object { "input2$_" }
+
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $tempBuildRoot = Join-Path $env:LOCALAPPDATA 'Temp\img2bin_tools_build_release'
 $buildDir = Join-Path $tempBuildRoot $timestamp
 $distRoot = Join-Path $repoRoot 'dist'
 $releaseDir = Join-Path $distRoot ("img2bin-tools-{0}-windows-x64" -f $versionText)
-$releaseRawExePath = Join-Path $releaseDir 'img2bin_raw.exe'
-$releaseImprleExePath = Join-Path $releaseDir 'img2bin_imprle.exe'
-$releaseRleExePath = Join-Path $releaseDir 'img2bin_rle.exe'
-$releaseQoiExePath = Join-Path $releaseDir 'img2bin_qoi.exe'
-$releaseQoifExePath = Join-Path $releaseDir 'img2bin_qoif.exe'
-$releaseIndexQoiExePath = Join-Path $releaseDir 'img2bin_indexqoi.exe'
-$rootRawExePath = Join-Path $repoRoot 'img2bin_raw.exe'
-$rootImprleExePath = Join-Path $repoRoot 'img2bin_imprle.exe'
-$rootRleExePath = Join-Path $repoRoot 'img2bin_rle.exe'
-$rootQoiExePath = Join-Path $repoRoot 'img2bin_qoi.exe'
-$rootQoifExePath = Join-Path $repoRoot 'img2bin_qoif.exe'
-$rootIndexQoiExePath = Join-Path $repoRoot 'img2bin_indexqoi.exe'
-$builtRawExePath = Join-Path $buildDir 'bin\img2bin_raw.exe'
-$builtImprleExePath = Join-Path $buildDir 'bin\img2bin_imprle.exe'
-$builtRleExePath = Join-Path $buildDir 'bin\img2bin_rle.exe'
-$builtQoiExePath = Join-Path $buildDir 'bin\img2bin_qoi.exe'
-$builtQoifExePath = Join-Path $buildDir 'bin\img2bin_qoif.exe'
-$builtIndexQoiExePath = Join-Path $buildDir 'bin\img2bin_indexqoi.exe'
+if (Test-Path -LiteralPath $releaseDir) {
+  Remove-Item -LiteralPath $releaseDir -Recurse -Force
+}
+$releaseWindowsDir = Join-Path $releaseDir 'windows'
+$releaseToolsDir = Join-Path $releaseWindowsDir 'tools'
+$releaseExamplesDir = Join-Path $releaseWindowsDir 'examples'
 $releaseReadmePath = Join-Path $releaseDir 'README.txt'
 $releaseDocsDir = Join-Path $releaseDir 'docs'
 $releaseUserDocsDir = Join-Path $releaseDocsDir 'user'
-$releaseInputDir = Join-Path $releaseDir 'input'
 $releaseOutputDir = Join-Path $releaseDir 'output'
+$repoToolsDir = Join-Path $windowsDir 'tools'
 $buildScriptPath = Join-Path $buildDir 'run_release_build.cmd'
 
-New-Item -ItemType Directory -Force -Path $tempBuildRoot, $buildDir, $distRoot, $releaseDir, $releaseDocsDir, $releaseInputDir, $releaseOutputDir | Out-Null
+New-Item -ItemType Directory -Force -Path $tempBuildRoot, $buildDir, $distRoot, $releaseDir, $releaseWindowsDir, $releaseToolsDir, $releaseExamplesDir, $releaseDocsDir, $releaseOutputDir, $repoToolsDir | Out-Null
+foreach ($folderName in $inputFolderNames) {
+  New-Item -ItemType Directory -Force -Path (Join-Path $releaseDir $folderName) | Out-Null
+}
 
 if (Test-Path -LiteralPath $releaseUserDocsDir) {
   Remove-Item -LiteralPath $releaseUserDocsDir -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $releaseUserDocsDir | Out-Null
 
+$ctestLine = "`"$ctest`" --test-dir `"$buildDir`" --output-on-failure"
+if ($SkipTests) {
+  $ctestLine = 'echo Tests skipped by -SkipTests.'
+}
+
 $buildScript = @"
 @echo off
 call "$vsDevCmd" -arch=x64 >nul
 if errorlevel 1 exit /b %errorlevel%
+set CC=cl
 "$cmake" -S "$builderDir" -B "$buildDir" -G Ninja -DCMAKE_MAKE_PROGRAM="$ninja"
 if errorlevel 1 exit /b %errorlevel%
 "$cmake" --build "$buildDir" --config Release
 if errorlevel 1 exit /b %errorlevel%
-"$ctest" --test-dir "$buildDir" --output-on-failure
+$ctestLine
 exit /b %errorlevel%
 "@
 Set-Content -Path $buildScriptPath -Value $buildScript -Encoding ascii
@@ -171,50 +193,45 @@ if ($LASTEXITCODE -ne 0) {
   Fail-WithMessage 'Release 构建或测试失败，未生成发布目录。'
 }
 
-if (!(Test-Path -LiteralPath $builtRawExePath)) {
-  Fail-WithMessage '构建完成后未找到 img2bin_raw.exe。'
+$builtExePaths = @{}
+foreach ($tool in $toolNames) {
+  $builtExePaths[$tool] = Join-Path $buildDir "bin\img2bin_$tool.exe"
+  if (!(Test-Path -LiteralPath $builtExePaths[$tool])) {
+    Fail-WithMessage "构建完成后未找到 img2bin_$tool.exe。"
+  }
 }
-if (!(Test-Path -LiteralPath $builtImprleExePath)) {
-  Fail-WithMessage '构建完成后未找到 img2bin_imprle.exe。'
-}
-if (!(Test-Path -LiteralPath $builtRleExePath)) {
-  Fail-WithMessage '构建完成后未找到 img2bin_rle.exe。'
-}
-if (!(Test-Path -LiteralPath $builtQoiExePath)) {
-  Fail-WithMessage '构建完成后未找到 img2bin_qoi.exe。'
-}
-if (!(Test-Path -LiteralPath $builtQoifExePath)) {
-  Fail-WithMessage '构建完成后未找到 img2bin_qoif.exe。'
-}
-if (!(Test-Path -LiteralPath $builtIndexQoiExePath)) {
-  Fail-WithMessage '构建完成后未找到 img2bin_indexqoi.exe。'
+$builtPackExePath = Join-Path $buildDir 'bin\img2bin_pack.exe'
+if (!(Test-Path -LiteralPath $builtPackExePath)) {
+  Fail-WithMessage '构建完成后未找到 img2bin_pack.exe。'
 }
 
 $readmeTemplate = Get-Content -Path $readmeTemplatePath -Raw -Encoding UTF8
 $readmeText = $readmeTemplate.Replace('__VERSION_TEXT__', $versionText).Replace('__VERSION_SEMVER__', $versionSemver)
 
-Copy-Item -LiteralPath $builtRawExePath -Destination $rootRawExePath -Force
-Copy-Item -LiteralPath $builtImprleExePath -Destination $rootImprleExePath -Force
-Copy-Item -LiteralPath $builtRleExePath -Destination $rootRleExePath -Force
-Copy-Item -LiteralPath $builtQoiExePath -Destination $rootQoiExePath -Force
-Copy-Item -LiteralPath $builtQoifExePath -Destination $rootQoifExePath -Force
-Copy-Item -LiteralPath $builtIndexQoiExePath -Destination $rootIndexQoiExePath -Force
-Copy-Item -LiteralPath $builtRawExePath -Destination $releaseRawExePath -Force
-Copy-Item -LiteralPath $builtImprleExePath -Destination $releaseImprleExePath -Force
-Copy-Item -LiteralPath $builtRleExePath -Destination $releaseRleExePath -Force
-Copy-Item -LiteralPath $builtQoiExePath -Destination $releaseQoiExePath -Force
-Copy-Item -LiteralPath $builtQoifExePath -Destination $releaseQoifExePath -Force
-Copy-Item -LiteralPath $builtIndexQoiExePath -Destination $releaseIndexQoiExePath -Force
+foreach ($tool in $toolNames) {
+  Copy-Item -LiteralPath $builtExePaths[$tool] -Destination (Join-Path $repoToolsDir "img2bin_$tool.exe") -Force
+  Copy-Item -LiteralPath $builtExePaths[$tool] -Destination (Join-Path $releaseToolsDir "img2bin_$tool.exe") -Force
+}
+Copy-Item -LiteralPath $builtPackExePath -Destination (Join-Path $windowsDir 'img2bin_pack.exe') -Force
+Copy-Item -LiteralPath $builtPackExePath -Destination (Join-Path $releaseWindowsDir 'img2bin_pack.exe') -Force
+Copy-Item -LiteralPath (Join-Path $windowsDir 'img2bin_pack.json') -Destination (Join-Path $releaseWindowsDir 'img2bin_pack.json') -Force
+Copy-Item -Path (Join-Path $windowsDir 'examples\*') -Destination $releaseExamplesDir -Recurse -Force
 Copy-Item -Path (Join-Path $userDocsSourceDir '*') -Destination $releaseUserDocsDir -Recurse -Force
+
+foreach ($folderName in $inputFolderNames) {
+  $sampleSource = Join-Path $repoRoot $folderName
+  if (Test-Path -LiteralPath $sampleSource) {
+    Get-ChildItem -LiteralPath $sampleSource -File | Where-Object { $_.Extension -match '\.(png|bmp|jpg|jpeg)$' } | ForEach-Object {
+      Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $releaseDir $folderName) -Force
+    }
+  }
+}
+
 Set-Content -Path $releaseReadmePath -Value $readmeText -Encoding utf8
 
 Write-Host ''
 Write-Host '发布完成。'
-Write-Host "项目根目录 RAW exe: $rootRawExePath"
-Write-Host "项目根目录 IMPRLE exe: $rootImprleExePath"
-Write-Host "项目根目录 RLE exe: $rootRleExePath"
-Write-Host "项目根目录 QOI exe: $rootQoiExePath"
-Write-Host "项目根目录 QOIF exe: $rootQoifExePath"
-Write-Host "项目根目录 IndexQOI exe: $rootIndexQoiExePath"
+Write-Host "取模工具目录: $repoToolsDir"
+Write-Host "统筹管理器: $(Join-Path $windowsDir 'img2bin_pack.exe')"
 Write-Host "发布目录: $releaseDir"
 Write-Host "发布说明: $releaseReadmePath"

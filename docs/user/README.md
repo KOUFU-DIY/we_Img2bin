@@ -5,29 +5,35 @@
 当前版本特点：
 
 - 每个 `exe` 对应一种压缩算法
-- 所有工具默认输出纯 `bin`
+- 六个取模工具默认输出纯 `bin`
+- 统筹管理器 `img2bin_pack.exe` 可批量调度全部工具，并把 `.bin` 汇总生成 `.c/.h`
 - 默认大端模式
-- 默认从 `input` 目录读取，输出到 `output` 目录
+- 单个工具默认从 `input` 目录读取；统筹管理器按 `input2<算法>` 文件夹分发
 - 支持双击运行、拖拽输入和命令行调用
 - 批处理模式会输出 `manifest.json`
 
 ## 文档导航
 
+- [统筹管理器说明](README-pack.md)
 - [工具说明](README-tools.md)
 - [像素格式说明](README-formats.md)
 - [解码编写说明](README-decoder.md)
 - [协议与验证说明](README-protocol.md)
 
-## 六个工具分别做什么
+## 各个程序分别做什么
 
-| 工具 | 用途 |
+| 程序 | 用途 |
 | --- | --- |
+| `img2bin_pack.exe` | 统筹管理器：按 `input2<算法>` 文件夹批量调度下面六个工具，并生成 `.c/.h` |
 | `img2bin_raw.exe` | 无压缩输出 |
 | `img2bin_imprle.exe` | 改进 RLE 压缩输出 |
 | `img2bin_rle.exe` | 原始 RLE 压缩输出 |
 | `img2bin_qoi.exe` | 原始 QOI 压缩输出 |
 | `img2bin_qoif.exe` | 原始 QOI（无字典）压缩输出 |
 | `img2bin_indexqoi.exe` | 索引 QOI 压缩输出 |
+
+发布目录中，六个取模工具在 `windows\tools\`，统筹管理器在 `windows\`。
+推荐的批量用法见 [统筹管理器说明](README-pack.md)；下面是单个工具的用法。
 
 ## 默认使用方式
 
@@ -63,9 +69,9 @@
 
 ## 你最需要先知道的几点
 
-- 这套工具当前只输出 `.bin`
+- 六个取模工具只输出 `.bin`，不带信息头、结构体文本、数组文本
+- 需要 `.c/.h` 数组时用统筹管理器 `img2bin_pack.exe`，见 [统筹管理器说明](README-pack.md)
 - 没有 GUI
-- 没有信息头、结构体文本、数组文本输出
 - 若目标格式不带 Alpha，透明区域会先按背景色混合，再转目标格式
 - `img2bin_indexqoi.exe` 默认索引间隔是图片宽度，可用 `--index-interval` 改
 - 如果你要自己写解码器，请重点看 [解码编写说明](README-decoder.md) 和 [像素格式说明](README-formats.md)
