@@ -26,6 +26,7 @@
 #include "filesystem.h"
 #include "format.h"
 #include "image_io.h"
+#include "img2bin_decode.h"
 #include "imprle_encoder.h"
 #include "pack_codegen.h"
 #include "pack_config.h"
@@ -2221,6 +2222,233 @@ static void test_pack_end_to_end(void)
   free(text);
 }
 
+static void test_build_roundtrip_pixels(unsigned char *pixels, int width, int height)
+{
+  int x = 0;
+  int y = 0;
+
+  for (y = 0; y < height; ++y) {
+    for (x = 0; x < width; ++x) {
+      unsigned char *pixel = pixels + ((size_t)y * (size_t)width + (size_t)x) * 4u;
+
+      if (y == 0) {
+        pixel[0] = 200; pixel[1] = 100; pixel[2] = 50; pixel[3] = 255;
+      } else if (y == 1) {
+        pixel[0] = (unsigned char)(100 + x); pixel[1] = (unsigned char)(100 + x); pixel[2] = (unsigned char)(100 + x); pixel[3] = 255;
+      } else if (y == 2) {
+        pixel[0] = (unsigned char)(x * 16); pixel[1] = (unsigned char)(255 - x * 16); pixel[2] = 128; pixel[3] = 255;
+      } else if (y == 3) {
+        pixel[0] = 255; pixel[1] = 0; pixel[2] = 0; pixel[3] = (unsigned char)(x * 17);
+      } else if (y == 4) {
+        int alternate = x & 1;
+        pixel[0] = alternate ? 10 : 240; pixel[1] = alternate ? 250 : 20; pixel[2] = alternate ? 60 : 200; pixel[3] = 255;
+      } else if (y == 5) {
+        pixel[0] = 0; pixel[1] = 0; pixel[2] = 0; pixel[3] = 0;
+      } else {
+        pixel[0] = (unsigned char)(x * 7 + y * 13);
+        pixel[1] = (unsigned char)(x * 11 + y * 3);
+        pixel[2] = (unsigned char)(x * 5 + y * 29);
+        pixel[3] = (unsigned char)(((x + y) & 1) ? 255 : 128);
+      }
+    }
+  }
+}
+
+static void test_decoder_expect_roundtrip(
+  const char *algorithm_label,
+  const img2bin_format_info_t *info,
+  img2bin_endianness_t endianness,
+  img2bin_decode_status_t status,
+  const unsigned char *decoded,
+  size_t decoded_size,
+  const unsigned char *raw_reference,
+  size_t raw_size)
+{
+  char label[192];
+
+  snprintf(label, sizeof(label), "%s roundtrip (%s, %s)", algorithm_label, info->name, endianness == IMG2BIN_ENDIAN_BIG ? "be" : "le");
+
+  if (status != IMG2BIN_DECODE_OK) {
+    fprintf(stderr, "TEST FAILURE: %s decode failed with status %d.\n", label, (int)status);
+    ++g_test_failures;
+    return;
+  }
+  if (decoded_size != raw_size) {
+    fprintf(stderr, "TEST FAILURE: %s size mismatch (decoded=%zu raw=%zu).\n", label, decoded_size, raw_size);
+    ++g_test_failures;
+    return;
+  }
+  test_expect_bytes(decoded, raw_reference, raw_size, label);
+}
+
+static void test_decoder_roundtrip_all(void)
+{
+  enum { ROUNDTRIP_W = 16, ROUNDTRIP_H = 9 };
+  static unsigned char pixels[(size_t)ROUNDTRIP_W * ROUNDTRIP_H * 4u];
+  unsigned char decoded[(size_t)ROUNDTRIP_W * ROUNDTRIP_H * 4u];
+  img2bin_image_t image;
+  img2bin_rgb_t background = { 16, 32, 48 };
+  char error[256];
+  char label[192];
+  size_t format_index = 0;
+  int endian_index = 0;
+  size_t slot = 0;
+  const size_t pixel_count = (size_t)ROUNDTRIP_W * (size_t)ROUNDTRIP_H;
+
+  test_build_roundtrip_pixels(pixels, ROUNDTRIP_W, ROUNDTRIP_H);
+  image.width = ROUNDTRIP_W;
+  image.height = ROUNDTRIP_H;
+  image.pixels = pixels;
+
+  for (format_index = 0; format_index < IMG2BIN_FMT_COUNT; ++format_index) {
+    for (endian_index = 0; endian_index < 2; ++endian_index) {
+      img2bin_pixel_format_t format = (img2bin_pixel_format_t)format_index;
+      img2bin_endianness_t endianness = endian_index == 0 ? IMG2BIN_ENDIAN_BIG : IMG2BIN_ENDIAN_LITTLE;
+      img2bin_decode_format_t decode_format = (img2bin_decode_format_t)format_index;
+      img2bin_decode_endianness_t decode_endianness = endian_index == 0 ? IMG2BIN_DECODE_BIG_ENDIAN : IMG2BIN_DECODE_LITTLE_ENDIAN;
+      const img2bin_format_info_t *info = img2bin_get_format_info(format);
+      img2bin_indexqoi_header_t header;
+      unsigned char *raw_buffer = NULL;
+      unsigned char *encoded = NULL;
+      size_t raw_size = 0;
+      size_t encoded_size = 0;
+      size_t decoded_size = 0;
+      img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
+
+      TEST_ASSERT(info != NULL, "Roundtrip format info is missing.");
+      TEST_ASSERT(img2bin_decode_bytes_per_pixel(decode_format) == info->bytes_per_pixel, "Decoder bytes-per-pixel mismatch.");
+      TEST_ASSERT(img2bin_encode_raw_image(format, endianness, background, &image, &raw_buffer, &raw_size, error, sizeof(error)), error);
+
+      status = img2bin_decode_raw(raw_buffer, raw_size, decode_format, pixel_count, decoded, sizeof(decoded), &decoded_size);
+      test_decoder_expect_roundtrip("raw", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
+
+      TEST_ASSERT(img2bin_encode_rle_image(format, endianness, background, &image, &encoded, &encoded_size, error, sizeof(error)), error);
+      status = img2bin_decode_rle(encoded, encoded_size, decode_format, pixel_count, decoded, sizeof(decoded), &decoded_size);
+      test_decoder_expect_roundtrip("rle", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
+      free(encoded);
+      encoded = NULL;
+
+      TEST_ASSERT(img2bin_encode_imprle_image(format, endianness, background, &image, &encoded, &encoded_size, error, sizeof(error)), error);
+      status = img2bin_decode_imprle(encoded, encoded_size, decode_format, pixel_count, decoded, sizeof(decoded), &decoded_size);
+      test_decoder_expect_roundtrip("imprle", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
+      free(encoded);
+      encoded = NULL;
+
+      TEST_ASSERT(img2bin_encode_qoi_image(format, endianness, background, &image, &encoded, &encoded_size, error, sizeof(error)), error);
+      status = img2bin_decode_qoi(encoded, encoded_size, decode_format, decode_endianness, pixel_count, decoded, sizeof(decoded), &decoded_size);
+      test_decoder_expect_roundtrip("qoi", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
+      free(encoded);
+      encoded = NULL;
+
+      TEST_ASSERT(img2bin_encode_qoif_image(format, endianness, background, &image, &encoded, &encoded_size, error, sizeof(error)), error);
+      status = img2bin_decode_qoif(encoded, encoded_size, decode_format, decode_endianness, pixel_count, decoded, sizeof(decoded), &decoded_size);
+      test_decoder_expect_roundtrip("qoif", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
+      free(encoded);
+      encoded = NULL;
+
+      TEST_ASSERT(img2bin_encode_indexqoi_image(format, endianness, background, &image, 0u, &encoded, &encoded_size, error, sizeof(error)), error);
+      status = img2bin_decode_indexqoi_header(encoded, encoded_size, &header);
+      TEST_ASSERT(status == IMG2BIN_DECODE_OK, "indexQOI header parse failed.");
+      TEST_ASSERT(header.width == ROUNDTRIP_W && header.height == ROUNDTRIP_H, "indexQOI header dimensions mismatch.");
+      TEST_ASSERT(header.index_interval == ROUNDTRIP_W, "indexQOI default interval should equal image width.");
+      TEST_ASSERT(header.slot_count == (size_t)ROUNDTRIP_H, "indexQOI slot count mismatch.");
+
+      status = img2bin_decode_indexqoi(encoded, encoded_size, decode_format, decode_endianness, decoded, sizeof(decoded), &decoded_size);
+      test_decoder_expect_roundtrip("indexqoi", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
+
+      for (slot = 0; slot < header.slot_count; ++slot) {
+        size_t base_pixel = slot * (size_t)header.index_interval;
+        size_t tail_size = (pixel_count - base_pixel) * info->bytes_per_pixel;
+
+        status = img2bin_decode_indexqoi_from_slot(encoded, encoded_size, decode_format, decode_endianness, slot, decoded, sizeof(decoded), &decoded_size);
+        snprintf(label, sizeof(label), "indexqoi slot %u (%s, %s)", (unsigned int)slot, info->name, endian_index == 0 ? "be" : "le");
+        if (status != IMG2BIN_DECODE_OK || decoded_size != tail_size) {
+          fprintf(stderr, "TEST FAILURE: %s status=%d decoded=%zu expected=%zu.\n", label, (int)status, decoded_size, tail_size);
+          ++g_test_failures;
+        } else {
+          test_expect_bytes(decoded, raw_buffer + base_pixel * info->bytes_per_pixel, tail_size, label);
+        }
+      }
+      free(encoded);
+      encoded = NULL;
+
+      TEST_ASSERT(img2bin_encode_indexqoi_image(format, endianness, background, &image, 5u, &encoded, &encoded_size, error, sizeof(error)), error);
+      status = img2bin_decode_indexqoi(encoded, encoded_size, decode_format, decode_endianness, decoded, sizeof(decoded), &decoded_size);
+      test_decoder_expect_roundtrip("indexqoi-interval5", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
+      free(encoded);
+      encoded = NULL;
+
+      free(raw_buffer);
+      raw_buffer = NULL;
+    }
+  }
+}
+
+static void test_decoder_rejects_damage(void)
+{
+  unsigned char pixels[4 * 4];
+  unsigned char decoded[64];
+  unsigned char tampered[4096];
+  img2bin_image_t image;
+  img2bin_rgb_t background = { 0, 0, 0 };
+  char error[256];
+  unsigned char *encoded = NULL;
+  size_t encoded_size = 0;
+  size_t decoded_size = 0;
+  img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
+  const unsigned char lone_index_op[1] = { 0x00 };
+  const unsigned char underflow_diff_op[1] = { 0x40 };
+  unsigned char bad_header[13] = { 0x0C, 0, 1, 0, 1, 0, 1, 0, 2, 0, 0, 0, 0 };
+  size_t index = 0;
+
+  for (index = 0; index < 4; ++index) {
+    pixels[index * 4 + 0] = (unsigned char)(index * 60);
+    pixels[index * 4 + 1] = (unsigned char)(255 - index * 60);
+    pixels[index * 4 + 2] = (unsigned char)(index * 30 + 10);
+    pixels[index * 4 + 3] = 255;
+  }
+  image.width = 4;
+  image.height = 1;
+  image.pixels = pixels;
+
+  TEST_ASSERT(img2bin_encode_qoif_image(IMG2BIN_FMT_RGB565, IMG2BIN_ENDIAN_BIG, background, &image, &encoded, &encoded_size, error, sizeof(error)), error);
+  TEST_ASSERT(encoded_size + 1 <= sizeof(tampered), "QOIF damage fixture is unexpectedly large.");
+
+  status = img2bin_decode_qoif(encoded, encoded_size - 1, IMG2BIN_DECODE_FMT_RGB565, IMG2BIN_DECODE_BIG_ENDIAN, 4, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_ERR_TRUNCATED, "Truncated QOIF must be rejected.");
+
+  memcpy(tampered, encoded, encoded_size);
+  tampered[encoded_size] = 0x55;
+  status = img2bin_decode_qoif(tampered, encoded_size + 1, IMG2BIN_DECODE_FMT_RGB565, IMG2BIN_DECODE_BIG_ENDIAN, 4, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_ERR_TRAILING_DATA, "Trailing bytes after QOIF must be rejected.");
+
+  status = img2bin_decode_qoif(encoded, encoded_size, IMG2BIN_DECODE_FMT_RGB565, IMG2BIN_DECODE_BIG_ENDIAN, 3, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status != IMG2BIN_DECODE_OK, "Wrong pixel count must be rejected.");
+  free(encoded);
+  encoded = NULL;
+
+  status = img2bin_decode_qoif(lone_index_op, sizeof(lone_index_op), IMG2BIN_DECODE_FMT_RGB565, IMG2BIN_DECODE_BIG_ENDIAN, 1, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "OP_INDEX inside QOIF must be rejected.");
+
+  status = img2bin_decode_qoi(underflow_diff_op, sizeof(underflow_diff_op), IMG2BIN_DECODE_FMT_RGB565, IMG2BIN_DECODE_BIG_ENDIAN, 1, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "Channel underflow in OP_DIFF must be rejected.");
+
+  TEST_ASSERT(img2bin_encode_rle_image(IMG2BIN_FMT_RGB332, IMG2BIN_ENDIAN_BIG, background, &image, &encoded, &encoded_size, error, sizeof(error)), error);
+  TEST_ASSERT(encoded_size <= sizeof(tampered), "RLE damage fixture is unexpectedly large.");
+  memcpy(tampered, encoded, encoded_size);
+  tampered[encoded_size - 1] = 0x09;
+  status = img2bin_decode_rle(tampered, encoded_size, IMG2BIN_DECODE_FMT_RGB332, 4, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status != IMG2BIN_DECODE_OK, "RLE without terminator must be rejected.");
+  free(encoded);
+  encoded = NULL;
+
+  {
+    img2bin_indexqoi_header_t header;
+    status = img2bin_decode_indexqoi_header(bad_header, sizeof(bad_header), &header);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "indexQOI header with a wrong length byte must be rejected.");
+  }
+}
+
 static void test_pack_folder_selection_and_emit(void)
 {
   char stage[IMG2BIN_PATH_CAPACITY];
@@ -2397,6 +2625,8 @@ int main(void)
   test_pack_discovery_finds_tools();
   test_pack_end_to_end();
   test_pack_folder_selection_and_emit();
+  test_decoder_roundtrip_all();
+  test_decoder_rejects_damage();
 #ifdef _WIN32
   test_windows_icon_resource_for_executable("img2bin_raw.exe");
   test_windows_icon_resource_for_executable("img2bin_imprle.exe");

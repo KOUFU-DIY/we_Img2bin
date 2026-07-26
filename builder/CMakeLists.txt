@@ -135,6 +135,14 @@ target_include_directories(img2bin_qoi_algo
 )
 target_link_libraries(img2bin_qoi_algo PUBLIC img2bin_core)
 
+add_library(img2bin_decoder STATIC
+  src/decoder/img2bin_decode.c
+)
+target_include_directories(img2bin_decoder
+  PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/decoder"
+)
+
 add_library(img2bin_pack_core STATIC
   src/pack/pack_codegen.c
   src/pack/pack_config.c
@@ -344,10 +352,11 @@ target_include_directories(img2bin_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_qoif"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_indexqoi"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pack"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/decoder"
   "${IMG2BIN_THIRD_PARTY_DIR}"
 )
 target_compile_definitions(img2bin_tests PRIVATE IMG2BIN_SOURCE_DIR="${IMG2BIN_SOURCE_DIR_CMAKE}")
-target_link_libraries(img2bin_tests PRIVATE img2bin_raw_app img2bin_imprle_app img2bin_rle_app img2bin_qoi_app img2bin_qoif_app img2bin_indexqoi_app img2bin_pack_core)
+target_link_libraries(img2bin_tests PRIVATE img2bin_raw_app img2bin_imprle_app img2bin_rle_app img2bin_qoi_app img2bin_qoif_app img2bin_indexqoi_app img2bin_pack_core img2bin_decoder)
 add_dependencies(img2bin_tests img2bin_raw img2bin_imprle img2bin_rle img2bin_qoi img2bin_qoif img2bin_indexqoi img2bin_pack)
 if(WIN32)
   target_link_libraries(img2bin_tests PRIVATE version)
