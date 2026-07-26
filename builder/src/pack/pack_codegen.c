@@ -1,5 +1,6 @@
 #include "pack_codegen.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 

@@ -35,6 +35,7 @@ static const img2bin_tool_descriptor_t g_img2bin_raw_tool = {
   "raw",
   "img2bin_raw-manifest.json",
   0,
+  IMG2BIN_HEADER_ALGO_RAW,
   img2bin_raw_encode_adapter
 };
 

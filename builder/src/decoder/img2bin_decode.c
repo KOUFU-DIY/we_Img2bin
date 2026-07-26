@@ -704,6 +704,151 @@ img2bin_decode_status_t img2bin_decode_qoif(
   return img2bin_decode_qoi_stream(input, input_size, format, endianness, pixel_count, 0, output, output_capacity, out_written);
 }
 
+static int img2bin_decode_format_from_nibble(uint8_t nibble, img2bin_decode_format_t *out_format)
+{
+  switch (nibble) {
+    case 0x0: *out_format = IMG2BIN_DECODE_FMT_RGB565; return 1;
+    case 0x1: *out_format = IMG2BIN_DECODE_FMT_RGB888; return 1;
+    case 0x4: *out_format = IMG2BIN_DECODE_FMT_RGB332; return 1;
+    case 0x5: *out_format = IMG2BIN_DECODE_FMT_ARGB8888; return 1;
+    case 0x6: *out_format = IMG2BIN_DECODE_FMT_ARGB6666; return 1;
+    case 0x7: *out_format = IMG2BIN_DECODE_FMT_ARGB4444; return 1;
+    case 0x8: *out_format = IMG2BIN_DECODE_FMT_ARGB8565; return 1;
+    case 0x9: *out_format = IMG2BIN_DECODE_FMT_ARGB2222; return 1;
+    case 0xA: *out_format = IMG2BIN_DECODE_FMT_RAGB5155; return 1;
+    default: return 0; /* 0x2/0x3 旧枚举 RGB555/RGB444，0xF OLED 点阵保留 */
+  }
+}
+
+img2bin_decode_status_t img2bin_decode_header(
+  const uint8_t *input,
+  size_t input_size,
+  img2bin_decode_header_t *out_header)
+{
+  img2bin_decode_header_t header;
+
+  if (input == 0 || out_header == 0) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
+  if (input_size < IMG2BIN_DECODE_HEADER_SIZE) {
+    return IMG2BIN_DECODE_ERR_TRUNCATED;
+  }
+
+  header.resource_type = input[0];
+  header.algorithm_nibble = (uint8_t)(input[1] >> 4);
+  header.format_nibble = (uint8_t)(input[1] & 0x0Fu);
+  header.width = (uint16_t)(((uint16_t)input[2] << 8) | (uint16_t)input[3]);
+  header.height = (uint16_t)(((uint16_t)input[4] << 8) | (uint16_t)input[5]);
+
+  if (header.resource_type != IMG2BIN_DECODE_RESOURCE_TYPE_IMAGE) {
+    return IMG2BIN_DECODE_ERR_CORRUPT;
+  }
+  if (header.algorithm_nibble > (uint8_t)IMG2BIN_DECODE_ALGO_QOIF) {
+    return IMG2BIN_DECODE_ERR_CORRUPT;
+  }
+  if (!img2bin_decode_format_from_nibble(header.format_nibble, &header.format)) {
+    return IMG2BIN_DECODE_ERR_CORRUPT;
+  }
+  if (header.width == 0u || header.height == 0u) {
+    return IMG2BIN_DECODE_ERR_CORRUPT;
+  }
+
+  *out_header = header;
+  return IMG2BIN_DECODE_OK;
+}
+
+img2bin_decode_status_t img2bin_decode_image(
+  const uint8_t *input,
+  size_t input_size,
+  img2bin_decode_endianness_t endianness,
+  img2bin_decode_header_t *out_header,
+  uint8_t *output,
+  size_t output_capacity,
+  size_t *out_written)
+{
+  img2bin_decode_header_t header;
+  img2bin_indexqoi_header_t inner_header;
+  img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
+  const uint8_t *payload = 0;
+  size_t payload_size = 0u;
+  size_t pixel_count = 0u;
+
+  status = img2bin_decode_header(input, input_size, &header);
+  if (status != IMG2BIN_DECODE_OK) {
+    return status;
+  }
+
+  payload = input + IMG2BIN_DECODE_HEADER_SIZE;
+  payload_size = input_size - IMG2BIN_DECODE_HEADER_SIZE;
+  pixel_count = (size_t)header.width * (size_t)header.height;
+
+  switch ((img2bin_decode_algorithm_t)header.algorithm_nibble) {
+    case IMG2BIN_DECODE_ALGO_RAW:
+      status = img2bin_decode_raw(payload, payload_size, header.format, pixel_count, output, output_capacity, out_written);
+      break;
+    case IMG2BIN_DECODE_ALGO_RLE:
+      status = img2bin_decode_rle(payload, payload_size, header.format, pixel_count, output, output_capacity, out_written);
+      break;
+    case IMG2BIN_DECODE_ALGO_IMPRLE:
+      status = img2bin_decode_imprle(payload, payload_size, header.format, pixel_count, output, output_capacity, out_written);
+      break;
+    case IMG2BIN_DECODE_ALGO_QOI:
+      status = img2bin_decode_qoi(payload, payload_size, header.format, endianness, pixel_count, output, output_capacity, out_written);
+      break;
+    case IMG2BIN_DECODE_ALGO_QOIF:
+      status = img2bin_decode_qoif(payload, payload_size, header.format, endianness, pixel_count, output, output_capacity, out_written);
+      break;
+    case IMG2BIN_DECODE_ALGO_INDEXQOI:
+      status = img2bin_decode_indexqoi_header(payload, payload_size, &inner_header);
+      if (status != IMG2BIN_DECODE_OK) {
+        return status;
+      }
+      if (inner_header.width != header.width || inner_header.height != header.height) {
+        return IMG2BIN_DECODE_ERR_CORRUPT;
+      }
+      status = img2bin_decode_indexqoi(payload, payload_size, header.format, endianness, output, output_capacity, out_written);
+      break;
+    default:
+      return IMG2BIN_DECODE_ERR_CORRUPT;
+  }
+
+  if (status == IMG2BIN_DECODE_OK && out_header != 0) {
+    *out_header = header;
+  }
+  return status;
+}
+
+img2bin_decode_status_t img2bin_decode_image_from_slot(
+  const uint8_t *input,
+  size_t input_size,
+  img2bin_decode_endianness_t endianness,
+  size_t slot,
+  uint8_t *output,
+  size_t output_capacity,
+  size_t *out_written)
+{
+  img2bin_decode_header_t header;
+  img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
+
+  status = img2bin_decode_header(input, input_size, &header);
+  if (status != IMG2BIN_DECODE_OK) {
+    return status;
+  }
+  if (header.algorithm_nibble != (uint8_t)IMG2BIN_DECODE_ALGO_INDEXQOI) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
+
+  return img2bin_decode_indexqoi_from_slot(
+    input + IMG2BIN_DECODE_HEADER_SIZE,
+    input_size - IMG2BIN_DECODE_HEADER_SIZE,
+    header.format,
+    endianness,
+    slot,
+    output,
+    output_capacity,
+    out_written);
+}
+
 img2bin_decode_status_t img2bin_decode_indexqoi_header(
   const uint8_t *input,
   size_t input_size,

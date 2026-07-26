@@ -1489,6 +1489,75 @@ static void test_batch_error_json_ndjson(void)
   free(manifest_text);
 }
 
+static void test_expect_headered_file(
+  const unsigned char *actual,
+  size_t actual_size,
+  const unsigned char *payload,
+  size_t payload_size,
+  unsigned int algorithm_nibble,
+  img2bin_pixel_format_t format,
+  int width,
+  int height,
+  const char *label)
+{
+  unsigned char header[IMG2BIN_RESOURCE_HEADER_SIZE];
+  char header_label[160];
+
+  TEST_ASSERT(
+    img2bin_build_resource_header(algorithm_nibble, format, (unsigned int)width, (unsigned int)height, header),
+    "Could not build the expected resource header.");
+
+  if (actual_size != payload_size + IMG2BIN_RESOURCE_HEADER_SIZE) {
+    fprintf(stderr, "TEST FAILURE: %s size mismatch (file=%zu payload=%zu).\n", label, actual_size, payload_size);
+    ++g_test_failures;
+    return;
+  }
+
+  snprintf(header_label, sizeof(header_label), "%s resource header", label);
+  test_expect_bytes(actual, header, IMG2BIN_RESOURCE_HEADER_SIZE, header_label);
+  test_expect_bytes(actual + IMG2BIN_RESOURCE_HEADER_SIZE, payload, payload_size, label);
+}
+
+static void test_resource_header_golden(void)
+{
+  unsigned char header[IMG2BIN_RESOURCE_HEADER_SIZE];
+  const unsigned char expected_raw_rgb565[IMG2BIN_RESOURCE_HEADER_SIZE] = { 0x00, 0x00, 0x00, 0x02, 0x00, 0x03 };
+  const unsigned char expected_qoif_ragb[IMG2BIN_RESOURCE_HEADER_SIZE] = { 0x00, 0x5A, 0x01, 0x00, 0x00, 0x40 };
+  const unsigned char bad_type[IMG2BIN_RESOURCE_HEADER_SIZE] = { 0x01, 0x00, 0x00, 0x01, 0x00, 0x01 };
+  const unsigned char bad_format[IMG2BIN_RESOURCE_HEADER_SIZE] = { 0x00, 0x02, 0x00, 0x01, 0x00, 0x01 };
+  const unsigned char bad_algo[IMG2BIN_RESOURCE_HEADER_SIZE] = { 0x00, 0x60, 0x00, 0x01, 0x00, 0x01 };
+  img2bin_decode_header_t decoded_header;
+
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_RGB565) == 0x0, "RGB565 header nibble mismatch.");
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_RGB888) == 0x1, "RGB888 header nibble mismatch.");
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_RGB332) == 0x4, "RGB332 header nibble mismatch.");
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_ARGB8888) == 0x5, "ARGB8888 header nibble mismatch.");
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_ARGB6666) == 0x6, "ARGB6666 header nibble mismatch.");
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_ARGB4444) == 0x7, "ARGB4444 header nibble mismatch.");
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_ARGB8565) == 0x8, "ARGB8565 header nibble mismatch.");
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_ARGB2222) == 0x9, "ARGB2222 header nibble mismatch.");
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_RAGB5155) == 0xA, "RAGB5155 header nibble mismatch.");
+
+  TEST_ASSERT(img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_RAW, IMG2BIN_FMT_RGB565, 2u, 3u, header), "Could not build the raw/rgb565 header.");
+  test_expect_bytes(header, expected_raw_rgb565, IMG2BIN_RESOURCE_HEADER_SIZE, "raw rgb565 resource header");
+
+  TEST_ASSERT(img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_QOIF, IMG2BIN_FMT_RAGB5155, 256u, 64u, header), "Could not build the qoif/ragb5155 header.");
+  test_expect_bytes(header, expected_qoif_ragb, IMG2BIN_RESOURCE_HEADER_SIZE, "qoif ragb5155 resource header");
+
+  TEST_ASSERT(!img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_RAW, IMG2BIN_FMT_RGB565, 0u, 3u, header), "Zero width must be rejected.");
+  TEST_ASSERT(!img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_RAW, IMG2BIN_FMT_RGB565, 65536u, 3u, header), "Width above 65535 must be rejected.");
+
+  TEST_ASSERT(img2bin_decode_header(expected_qoif_ragb, IMG2BIN_RESOURCE_HEADER_SIZE, &decoded_header) == IMG2BIN_DECODE_OK, "Decoder rejected a valid resource header.");
+  TEST_ASSERT(decoded_header.algorithm_nibble == 0x5, "Decoded header algorithm mismatch.");
+  TEST_ASSERT(decoded_header.format == IMG2BIN_DECODE_FMT_RAGB5155, "Decoded header format mismatch.");
+  TEST_ASSERT(decoded_header.width == 256 && decoded_header.height == 64, "Decoded header dimensions mismatch.");
+
+  TEST_ASSERT(img2bin_decode_header(bad_type, IMG2BIN_RESOURCE_HEADER_SIZE, &decoded_header) == IMG2BIN_DECODE_ERR_CORRUPT, "Font resource type must be rejected by the image decoder.");
+  TEST_ASSERT(img2bin_decode_header(bad_format, IMG2BIN_RESOURCE_HEADER_SIZE, &decoded_header) == IMG2BIN_DECODE_ERR_CORRUPT, "Legacy RGB555 nibble must be rejected.");
+  TEST_ASSERT(img2bin_decode_header(bad_algo, IMG2BIN_RESOURCE_HEADER_SIZE, &decoded_header) == IMG2BIN_DECODE_ERR_CORRUPT, "Unknown algorithm nibble must be rejected.");
+  TEST_ASSERT(img2bin_decode_header(expected_qoif_ragb, 5u, &decoded_header) == IMG2BIN_DECODE_ERR_TRUNCATED, "Short header must report truncation.");
+}
+
 static void test_imprle_cli_and_manifest(void)
 {
   char stage[IMG2BIN_PATH_CAPACITY];
@@ -1542,8 +1611,7 @@ static void test_imprle_cli_and_manifest(void)
     img2bin_encode_imprle_image(IMG2BIN_FMT_ARGB8888, IMG2BIN_ENDIAN_BIG, background, &image, &expected, &expected_size, error, sizeof(error)),
     error);
   TEST_ASSERT(img2bin_read_file(output_path, &actual, &actual_size, error, sizeof(error)), error);
-  TEST_ASSERT(actual_size == expected_size, "Improved-RLE CLI output size mismatch.");
-  test_expect_bytes(actual, expected, expected_size, "Improved-RLE CLI output");
+  test_expect_headered_file(actual, actual_size, expected, expected_size, IMG2BIN_HEADER_ALGO_IMPRLE, IMG2BIN_FMT_ARGB8888, image.width, image.height, "Improved-RLE CLI output");
 
   manifest_text = test_read_text_file(manifest_path);
   TEST_ASSERT(manifest_text != NULL, "Could not read improved-RLE manifest.");
@@ -1610,8 +1678,7 @@ static void test_rle_cli_and_manifest(void)
     img2bin_encode_rle_image(IMG2BIN_FMT_ARGB8888, IMG2BIN_ENDIAN_BIG, background, &image, &expected, &expected_size, error, sizeof(error)),
     error);
   TEST_ASSERT(img2bin_read_file(output_path, &actual, &actual_size, error, sizeof(error)), error);
-  TEST_ASSERT(actual_size == expected_size, "Original-RLE CLI output size mismatch.");
-  test_expect_bytes(actual, expected, expected_size, "Original-RLE CLI output");
+  test_expect_headered_file(actual, actual_size, expected, expected_size, IMG2BIN_HEADER_ALGO_RLE, IMG2BIN_FMT_ARGB8888, image.width, image.height, "Original-RLE CLI output");
 
   manifest_text = test_read_text_file(manifest_path);
   TEST_ASSERT(manifest_text != NULL, "Could not read original-RLE manifest.");
@@ -1678,8 +1745,7 @@ static void test_qoi_cli_and_manifest(void)
     img2bin_encode_qoi_image(IMG2BIN_FMT_ARGB8888, IMG2BIN_ENDIAN_BIG, background, &image, &expected, &expected_size, error, sizeof(error)),
     error);
   TEST_ASSERT(img2bin_read_file(output_path, &actual, &actual_size, error, sizeof(error)), error);
-  TEST_ASSERT(actual_size == expected_size, "Original-QOI CLI output size mismatch.");
-  test_expect_bytes(actual, expected, expected_size, "Original-QOI CLI output");
+  test_expect_headered_file(actual, actual_size, expected, expected_size, IMG2BIN_HEADER_ALGO_QOI, IMG2BIN_FMT_ARGB8888, image.width, image.height, "Original-QOI CLI output");
 
   manifest_text = test_read_text_file(manifest_path);
   TEST_ASSERT(manifest_text != NULL, "Could not read original-QOI manifest.");
@@ -1746,8 +1812,7 @@ static void test_qoif_cli_and_manifest(void)
     img2bin_encode_qoif_image(IMG2BIN_FMT_ARGB8888, IMG2BIN_ENDIAN_BIG, background, &image, &expected, &expected_size, error, sizeof(error)),
     error);
   TEST_ASSERT(img2bin_read_file(output_path, &actual, &actual_size, error, sizeof(error)), error);
-  TEST_ASSERT(actual_size == expected_size, "Original-QOIF CLI output size mismatch.");
-  test_expect_bytes(actual, expected, expected_size, "Original-QOIF CLI output");
+  test_expect_headered_file(actual, actual_size, expected, expected_size, IMG2BIN_HEADER_ALGO_QOIF, IMG2BIN_FMT_ARGB8888, image.width, image.height, "Original-QOIF CLI output");
 
   manifest_text = test_read_text_file(manifest_path);
   TEST_ASSERT(manifest_text != NULL, "Could not read original-QOIF manifest.");
@@ -1820,10 +1885,9 @@ static void test_indexqoi_cli_and_manifest(void)
     img2bin_encode_indexqoi_image(IMG2BIN_FMT_ARGB8888, IMG2BIN_ENDIAN_BIG, background, &image, 2u, &expected, &expected_size, error, sizeof(error)),
     error);
   TEST_ASSERT(img2bin_read_file(output_path, &actual, &actual_size, error, sizeof(error)), error);
-  TEST_ASSERT(actual_size == expected_size, "IndexQOI CLI output size mismatch.");
-  TEST_ASSERT(actual_size >= 13u, "IndexQOI CLI output is missing the index header.");
-  TEST_ASSERT(actual[5] == 0x00 && actual[6] == 0x02, "IndexQOI CLI output did not keep the requested index interval.");
-  test_expect_bytes(actual, expected, expected_size, "IndexQOI CLI output");
+  TEST_ASSERT(actual_size >= IMG2BIN_RESOURCE_HEADER_SIZE + 13u, "IndexQOI CLI output is missing the index header.");
+  TEST_ASSERT(actual[11] == 0x00 && actual[12] == 0x02, "IndexQOI CLI output did not keep the requested index interval.");
+  test_expect_headered_file(actual, actual_size, expected, expected_size, IMG2BIN_HEADER_ALGO_INDEXQOI, IMG2BIN_FMT_ARGB8888, image.width, image.height, "IndexQOI CLI output");
 
   manifest_text = test_read_text_file(manifest_path);
   TEST_ASSERT(manifest_text != NULL, "Could not read IndexQOI manifest.");
@@ -2378,6 +2442,49 @@ static void test_decoder_roundtrip_all(void)
       free(encoded);
       encoded = NULL;
 
+      {
+        unsigned char headered[2048];
+        unsigned char universal[IMG2BIN_RESOURCE_HEADER_SIZE];
+        img2bin_decode_header_t file_header;
+        size_t headered_size = 0;
+        size_t tail_size = 0;
+
+        TEST_ASSERT(img2bin_encode_qoif_image(format, endianness, background, &image, &encoded, &encoded_size, error, sizeof(error)), error);
+        TEST_ASSERT(encoded_size + IMG2BIN_RESOURCE_HEADER_SIZE <= sizeof(headered), "Headered QOIF fixture is unexpectedly large.");
+        TEST_ASSERT(img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_QOIF, format, ROUNDTRIP_W, ROUNDTRIP_H, universal), "Could not build the QOIF resource header.");
+        memcpy(headered, universal, IMG2BIN_RESOURCE_HEADER_SIZE);
+        memcpy(headered + IMG2BIN_RESOURCE_HEADER_SIZE, encoded, encoded_size);
+        headered_size = encoded_size + IMG2BIN_RESOURCE_HEADER_SIZE;
+        free(encoded);
+        encoded = NULL;
+
+        status = img2bin_decode_image(headered, headered_size, decode_endianness, &file_header, decoded, sizeof(decoded), &decoded_size);
+        test_decoder_expect_roundtrip("file-level qoif", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
+        TEST_ASSERT(file_header.format == decode_format, "decode_image reported the wrong format.");
+        TEST_ASSERT(file_header.width == ROUNDTRIP_W && file_header.height == ROUNDTRIP_H, "decode_image reported wrong dimensions.");
+
+        TEST_ASSERT(img2bin_encode_indexqoi_image(format, endianness, background, &image, 0u, &encoded, &encoded_size, error, sizeof(error)), error);
+        TEST_ASSERT(encoded_size + IMG2BIN_RESOURCE_HEADER_SIZE <= sizeof(headered), "Headered indexQOI fixture is unexpectedly large.");
+        TEST_ASSERT(img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_INDEXQOI, format, ROUNDTRIP_W, ROUNDTRIP_H, universal), "Could not build the indexQOI resource header.");
+        memcpy(headered, universal, IMG2BIN_RESOURCE_HEADER_SIZE);
+        memcpy(headered + IMG2BIN_RESOURCE_HEADER_SIZE, encoded, encoded_size);
+        headered_size = encoded_size + IMG2BIN_RESOURCE_HEADER_SIZE;
+        free(encoded);
+        encoded = NULL;
+
+        status = img2bin_decode_image(headered, headered_size, decode_endianness, NULL, decoded, sizeof(decoded), &decoded_size);
+        test_decoder_expect_roundtrip("file-level indexqoi", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
+
+        tail_size = (pixel_count - (size_t)ROUNDTRIP_W) * info->bytes_per_pixel;
+        status = img2bin_decode_image_from_slot(headered, headered_size, decode_endianness, 1u, decoded, sizeof(decoded), &decoded_size);
+        if (status != IMG2BIN_DECODE_OK || decoded_size != tail_size) {
+          fprintf(stderr, "TEST FAILURE: file-level indexqoi slot decode (%s) status=%d decoded=%zu expected=%zu.\n", info->name, (int)status, decoded_size, tail_size);
+          ++g_test_failures;
+        } else {
+          test_expect_bytes(decoded, raw_buffer + (size_t)ROUNDTRIP_W * info->bytes_per_pixel, tail_size, "file-level indexqoi slot decode");
+        }
+      }
+
       free(raw_buffer);
       raw_buffer = NULL;
     }
@@ -2625,6 +2732,7 @@ int main(void)
   test_pack_discovery_finds_tools();
   test_pack_end_to_end();
   test_pack_folder_selection_and_emit();
+  test_resource_header_golden();
   test_decoder_roundtrip_all();
   test_decoder_rejects_damage();
 #ifdef _WIN32

@@ -1004,6 +1004,12 @@ int img2bin_tool_get_info_json(const img2bin_tool_descriptor_t *tool, char *buff
         "    \"endianness_tokens\": {\n"
         "      \"big\": \"be\",\n"
         "      \"little\": \"le\"\n"
+        "    },\n"
+        "    \"resource_header\": {\n"
+        "      \"size\": 6,\n"
+        "      \"resource_type\": 0,\n"
+        "      \"algorithm_nibble\": %u,\n"
+        "      \"layout\": \"type:1,algo_format:1,width_be:2,height_be:2\"\n"
         "    }\n"
         "  },\n"
         "  \"exit_codes\": {\n"
@@ -1016,7 +1022,8 @@ int img2bin_tool_get_info_json(const img2bin_tool_descriptor_t *tool, char *buff
         "    \"batch_partial_failure\": 6\n"
         "  },\n"
         "  \"pixel_formats\": [\n",
-        tool->output_token)) {
+        tool->output_token,
+        tool->header_algorithm_nibble)) {
     return 0;
   }
 
@@ -1034,7 +1041,8 @@ int img2bin_tool_get_info_json(const img2bin_tool_descriptor_t *tool, char *buff
           "      \"bytes_per_pixel\": %u,\n"
           "      \"stores_alpha\": %s,\n"
           "      \"uses_background_color\": %s,\n"
-          "      \"endianness_affects_output\": %s\n"
+          "      \"endianness_affects_output\": %s,\n"
+          "      \"header_nibble\": %d\n"
           "    }%s\n",
           formats[index].name,
           formats[index].display_name_zh_cn,
@@ -1043,6 +1051,7 @@ int img2bin_tool_get_info_json(const img2bin_tool_descriptor_t *tool, char *buff
           formats[index].stores_alpha ? "true" : "false",
           formats[index].uses_background_color ? "true" : "false",
           formats[index].endianness_affects_output ? "true" : "false",
+          img2bin_get_format_header_nibble(formats[index].id),
           index + 1 == format_count ? "" : ",")) {
       return 0;
     }
@@ -1109,6 +1118,20 @@ static int img2bin_process_single_image(
   if (processed != NULL) {
     processed->width = image.width;
     processed->height = image.height;
+  }
+
+  if ((unsigned int)image.width > 0xFFFFu || (unsigned int)image.height > 0xFFFFu) {
+    img2bin_runtime_error_set(
+      runtime_error,
+      "image_too_large",
+      IMG2BIN_APP_EXIT_ENCODE_ERROR,
+      "encode",
+      image_path,
+      "图片宽高超过 65535，无法写入资源头。",
+      "Image dimensions exceed 65535 and do not fit the resource header.",
+      NULL);
+    img2bin_free_image(&image);
+    return 0;
   }
 
   for (format_index = 0; format_index < options->format_count; ++format_index) {
@@ -1198,8 +1221,56 @@ static int img2bin_process_single_image(
       return 0;
     }
 
-    written = img2bin_write_file(output_path, encoded, encoded_size, encode_error, sizeof(encode_error));
-    free(encoded);
+    {
+      unsigned char resource_header[IMG2BIN_RESOURCE_HEADER_SIZE];
+      unsigned char *file_data = NULL;
+      size_t file_size = 0;
+
+      if (!img2bin_build_resource_header(
+            tool->header_algorithm_nibble,
+            format->id,
+            (unsigned int)image.width,
+            (unsigned int)image.height,
+            resource_header)) {
+        free(encoded);
+        img2bin_runtime_error_set(
+          runtime_error,
+          "resource_header_failed",
+          IMG2BIN_APP_EXIT_INTERNAL_ERROR,
+          "internal",
+          image_path,
+          "生成资源头失败。",
+          "Failed to build the resource header.",
+          NULL);
+        img2bin_free_image(&image);
+        return 0;
+      }
+
+      file_size = encoded_size + IMG2BIN_RESOURCE_HEADER_SIZE;
+      file_data = (unsigned char *)malloc(file_size);
+      if (file_data == NULL) {
+        free(encoded);
+        img2bin_runtime_error_set(
+          runtime_error,
+          "out_of_memory",
+          IMG2BIN_APP_EXIT_INTERNAL_ERROR,
+          "internal",
+          image_path,
+          "内存不足。",
+          "Out of memory while assembling the output file.",
+          NULL);
+        img2bin_free_image(&image);
+        return 0;
+      }
+
+      memcpy(file_data, resource_header, IMG2BIN_RESOURCE_HEADER_SIZE);
+      memcpy(file_data + IMG2BIN_RESOURCE_HEADER_SIZE, encoded, encoded_size);
+      free(encoded);
+
+      written = img2bin_write_file(output_path, file_data, file_size, encode_error, sizeof(encode_error));
+      free(file_data);
+      encoded_size = file_size;
+    }
 
     if (!written) {
       img2bin_runtime_error_set(

@@ -35,6 +35,7 @@ typedef struct img2bin_tool_descriptor_s {
   const char *output_token;
   const char *manifest_file_name;
   int supports_index_interval;
+  unsigned int header_algorithm_nibble;
   img2bin_tool_encode_fn encode_image;
 } img2bin_tool_descriptor_t;
 

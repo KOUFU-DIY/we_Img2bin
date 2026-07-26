@@ -12,7 +12,10 @@
 
 - `--info` 输出到 stdout，manifest 写入输出目录，均为 UTF-8 JSON
 - 错误 JSON 输出到 **stderr**，每条一行；批处理中每张失败图片各输出一行（NDJSON）
-- 版本字段随 `version.h` 演进；`schema_version` 当前为 `1.0.0`
+- 版本字段随 `version.h` 演进；`schema_version` 当前为 `1.1.0`
+
+二进制侧的机器接口（6 字节通用资源头、算法/像素格式 nibble 编码表）见
+[协议与验证说明](README-protocol.md)的"通用资源头"一节。
 
 ## 一、取模工具 `--info`
 
@@ -41,6 +44,10 @@
 | `output.extension` | string | 固定 `bin` |
 | `output.filename_pattern` | string | `{source_stem}_{format_name}_<算法>_{endianness_token}_{width}x{height}.bin` |
 | `output.endianness_tokens` | object | `{"big":"be","little":"le"}` |
+| `output.resource_header.size` | number | 固定 6 |
+| `output.resource_header.resource_type` | number | 固定 0（图片） |
+| `output.resource_header.algorithm_nibble` | number | 本工具的算法 nibble（写入格式码高 4 位） |
+| `output.resource_header.layout` | string | `type:1,algo_format:1,width_be:2,height_be:2` |
 | `exit_codes` | object | 见"退出码"一节 |
 | `pixel_formats[]` | array | 支持的像素格式，见下表 |
 
@@ -71,6 +78,7 @@
 | `stores_alpha` | bool | 是否存储 Alpha |
 | `uses_background_color` | bool | 是否参与背景色混合 |
 | `endianness_affects_output` | bool | 大小端是否改变输出字节 |
+| `header_nibble` | number | 该格式在通用资源头格式码低 4 位中的取值 |
 
 ### 退出码（取模工具）
 

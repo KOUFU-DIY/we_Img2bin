@@ -2,11 +2,17 @@
  * img2bin 参考解码器 (reference decoder)
  *
  * 独立文件，不依赖本项目其他代码，也不使用动态内存，可直接拷贝到
- * 下位机工程使用。所有解码函数把压缩流还原为 RAW 打包像素字节流，
- * 输出与 img2bin_raw.exe 在同格式、同字节序下的输出逐字节一致。
+ * 下位机工程使用。协议细节见 docs/user/README-decoder.md。
  *
- * 宽高、像素格式、字节序需要由外部提供（文件名或 manifest），
- * 只有 indexQOI 自带 13 字节头。协议细节见 docs/user/README-decoder.md。
+ * 工具输出的 .bin 文件 = 6 字节通用资源头 + 算法 payload：
+ *   - 文件级接口（推荐）：img2bin_decode_header / img2bin_decode_image /
+ *     img2bin_decode_image_from_slot，输入整个 .bin 文件，按头自动分发。
+ *   - payload 级接口：img2bin_decode_raw/rle/imprle/qoi/qoif/indexqoi*，
+ *     输入去掉 6 字节通用头后的裸流（indexQOI 裸流自带 13 字节结构头）。
+ *
+ * 所有解码输出都是 RAW 打包像素字节流（不含任何头），与
+ * img2bin_raw.exe 输出的 payload 在同格式、同字节序下逐字节一致。
+ * 字节序不在头里，需要由外部提供（文件名或工程约定）。
  */
 #ifndef IMG2BIN_DECODE_H
 #define IMG2BIN_DECODE_H
@@ -45,6 +51,27 @@ typedef enum img2bin_decode_status_e {
   IMG2BIN_DECODE_ERR_TRAILING_DATA = 5
 } img2bin_decode_status_t;
 
+#define IMG2BIN_DECODE_HEADER_SIZE 6u
+#define IMG2BIN_DECODE_RESOURCE_TYPE_IMAGE 0x00u
+
+typedef enum img2bin_decode_algorithm_e {
+  IMG2BIN_DECODE_ALGO_RAW = 0x0,
+  IMG2BIN_DECODE_ALGO_RLE = 0x1,
+  IMG2BIN_DECODE_ALGO_IMPRLE = 0x2,
+  IMG2BIN_DECODE_ALGO_QOI = 0x3,
+  IMG2BIN_DECODE_ALGO_INDEXQOI = 0x4,
+  IMG2BIN_DECODE_ALGO_QOIF = 0x5
+} img2bin_decode_algorithm_t;
+
+typedef struct img2bin_decode_header_s {
+  uint8_t resource_type;
+  uint8_t algorithm_nibble;
+  uint8_t format_nibble;
+  img2bin_decode_format_t format;
+  uint16_t width;
+  uint16_t height;
+} img2bin_decode_header_t;
+
 typedef struct img2bin_indexqoi_header_s {
   uint16_t width;
   uint16_t height;
@@ -57,6 +84,31 @@ typedef struct img2bin_indexqoi_header_s {
 } img2bin_indexqoi_header_t;
 
 size_t img2bin_decode_bytes_per_pixel(img2bin_decode_format_t format);
+
+img2bin_decode_status_t img2bin_decode_header(
+  const uint8_t *input,
+  size_t input_size,
+  img2bin_decode_header_t *out_header);
+
+/* 解析通用头并按其中的算法/格式自动分发解码（indexQOI 也支持）。 */
+img2bin_decode_status_t img2bin_decode_image(
+  const uint8_t *input,
+  size_t input_size,
+  img2bin_decode_endianness_t endianness,
+  img2bin_decode_header_t *out_header,
+  uint8_t *output,
+  size_t output_capacity,
+  size_t *out_written);
+
+/* 带通用头的 indexQOI 文件：从第 slot 个索引点解码到图片末尾。 */
+img2bin_decode_status_t img2bin_decode_image_from_slot(
+  const uint8_t *input,
+  size_t input_size,
+  img2bin_decode_endianness_t endianness,
+  size_t slot,
+  uint8_t *output,
+  size_t output_capacity,
+  size_t *out_written);
 
 img2bin_decode_status_t img2bin_decode_raw(
   const uint8_t *input,

@@ -30,8 +30,8 @@
    - 汇总生成的 img_resources.c / img_resources.h
    - img2bin_pack-manifest.json 运行清单
 4. 像素格式、字节序、索引间隔等在 windows\img2bin_pack.json 里配置
-5. 六个取模工具只输出纯 bin；.c/.h 由统筹管理器生成，
-   数组内容与 .bin 逐字节一致
+5. 每个 .bin = 6 字节通用资源头(类型+算法/格式码+宽高) + 算法数据；
+   .c/.h 由统筹管理器生成，数组内容与 .bin 逐字节一致
 
 二、单个工具使用方式
 1. 双击 windows\tools 下任意一个 exe

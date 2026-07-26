@@ -49,3 +49,45 @@ int img2bin_parse_format_name(const char *name, img2bin_pixel_format_t *out_form
 
   return 0;
 }
+
+/* 像素格式 -> 通用头低 nibble。0x2/0x3 属于旧枚举的 RGB555/RGB444（本工具无），
+   0xF 保留给 OLED 点阵；此表是协议常量，与枚举顺序无关，改动需同步
+   参考解码器与 docs/user/README-schema.md。 */
+int img2bin_get_format_header_nibble(img2bin_pixel_format_t format)
+{
+  switch (format) {
+    case IMG2BIN_FMT_RGB565: return 0x0;
+    case IMG2BIN_FMT_RGB888: return 0x1;
+    case IMG2BIN_FMT_RGB332: return 0x4;
+    case IMG2BIN_FMT_ARGB8888: return 0x5;
+    case IMG2BIN_FMT_ARGB6666: return 0x6;
+    case IMG2BIN_FMT_ARGB4444: return 0x7;
+    case IMG2BIN_FMT_ARGB8565: return 0x8;
+    case IMG2BIN_FMT_ARGB2222: return 0x9;
+    case IMG2BIN_FMT_RAGB5155: return 0xA;
+    default: return -1;
+  }
+}
+
+int img2bin_build_resource_header(
+  unsigned int algorithm_nibble,
+  img2bin_pixel_format_t format,
+  unsigned int width,
+  unsigned int height,
+  unsigned char *out_header)
+{
+  int format_nibble = img2bin_get_format_header_nibble(format);
+
+  if (out_header == NULL || format_nibble < 0 || algorithm_nibble > 0x0Fu ||
+      width == 0u || height == 0u || width > 0xFFFFu || height > 0xFFFFu) {
+    return 0;
+  }
+
+  out_header[0] = (unsigned char)IMG2BIN_RESOURCE_TYPE_IMAGE;
+  out_header[1] = (unsigned char)((algorithm_nibble << 4) | (unsigned int)format_nibble);
+  out_header[2] = (unsigned char)((width >> 8) & 0xFFu);
+  out_header[3] = (unsigned char)(width & 0xFFu);
+  out_header[4] = (unsigned char)((height >> 8) & 0xFFu);
+  out_header[5] = (unsigned char)(height & 0xFFu);
+  return 1;
+}
