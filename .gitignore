@@ -1,0 +1,16 @@
+# CMake 构建目录
+builder/build/
+builder/build-ninja/
+builder/build-workspace/
+
+# GUI 依赖与构建产物
+builder/gui_tauri/node_modules/
+builder/gui_tauri/dist/
+builder/gui_tauri/src-tauri/target/
+builder/gui_tauri/*.log
+
+# 批处理生成结果
+output/
+
+# 临时文件
+*.tmp

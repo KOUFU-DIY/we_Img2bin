@@ -1,0 +1,18 @@
+[package]
+name = "img2bin-gui"
+version = "0.0.1"
+description = "img2bin GUI workbench"
+authors = ["img2bin"]
+edition = "2021"
+
+[lib]
+name = "img2bin_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
