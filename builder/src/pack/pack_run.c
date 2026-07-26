@@ -72,7 +72,8 @@ static void img2bin_pack_emit_error(const char *code, int exit_code, const char 
   char *escaped_detail = NULL;
 
   escaped_detail = img2bin_json_escape_alloc(detail != NULL ? detail : "");
-  printf(
+  fprintf(
+    stderr,
     "{\"error\":{\"code\":\"%s\",\"exit_code\":%d,\"message\":{\"zh_cn\":\"%s\",\"en\":\"%s\"},\"detail\":\"%s\"}}\n",
     code,
     exit_code,

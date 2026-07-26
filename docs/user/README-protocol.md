@@ -52,6 +52,8 @@
 
 ## 怎样从工具里拿到协议信息
 
+`--info` JSON 与各类 manifest 的逐字段说明见 [接口 Schema 说明](README-schema.md)。
+
 ## 1. 用 `--info` 获取机器可读元数据
 
 每个工具都支持：

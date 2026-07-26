@@ -17,8 +17,9 @@
 - [统筹管理器说明](README-pack.md)
 - [工具说明](README-tools.md)
 - [像素格式说明](README-formats.md)
-- [解码编写说明](README-decoder.md)
+- [解码编写说明](README-decoder.md)（含现成的 C99 参考解码器）
 - [协议与验证说明](README-protocol.md)
+- [接口 Schema 说明](README-schema.md)（`--info` 与 manifest 的逐字段文档）
 
 ## 各个程序分别做什么
 

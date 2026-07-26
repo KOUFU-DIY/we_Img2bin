@@ -9,6 +9,7 @@
 - docs\user\README-formats.md
 - docs\user\README-decoder.md
 - docs\user\README-protocol.md
+- docs\user\README-schema.md
 
 目录结构:
 - windows\img2bin_pack.exe    统筹管理器（批量调度 + 生成 .c/.h）
@@ -17,6 +18,7 @@
 - windows\examples\           自动批处理示例脚本与配置示例
 - input2raw\ 等六个文件夹      按算法分类放图片
 - output\                     转换结果
+- decoder\                    C99 参考解码器源码（拷进下位机工程即可用）
 - docs\user\                  用户文档
 
 一、推荐使用方式（统筹管理器）

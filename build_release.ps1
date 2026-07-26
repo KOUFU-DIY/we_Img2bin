@@ -154,10 +154,16 @@ $releaseReadmePath = Join-Path $releaseDir 'README.txt'
 $releaseDocsDir = Join-Path $releaseDir 'docs'
 $releaseUserDocsDir = Join-Path $releaseDocsDir 'user'
 $releaseOutputDir = Join-Path $releaseDir 'output'
+$releaseDecoderDir = Join-Path $releaseDir 'decoder'
+$decoderSourceDir = Join-Path $builderDir 'src\decoder'
 $repoToolsDir = Join-Path $windowsDir 'tools'
 $buildScriptPath = Join-Path $buildDir 'run_release_build.cmd'
 
-New-Item -ItemType Directory -Force -Path $tempBuildRoot, $buildDir, $distRoot, $releaseDir, $releaseWindowsDir, $releaseToolsDir, $releaseExamplesDir, $releaseDocsDir, $releaseOutputDir, $repoToolsDir | Out-Null
+if (!(Test-Path -LiteralPath (Join-Path $decoderSourceDir 'img2bin_decode.c'))) {
+  Fail-WithMessage '未找到参考解码器 builder\src\decoder\img2bin_decode.c。'
+}
+
+New-Item -ItemType Directory -Force -Path $tempBuildRoot, $buildDir, $distRoot, $releaseDir, $releaseWindowsDir, $releaseToolsDir, $releaseExamplesDir, $releaseDocsDir, $releaseOutputDir, $releaseDecoderDir, $repoToolsDir | Out-Null
 foreach ($folderName in $inputFolderNames) {
   New-Item -ItemType Directory -Force -Path (Join-Path $releaseDir $folderName) | Out-Null
 }
@@ -217,6 +223,8 @@ Copy-Item -LiteralPath $builtPackExePath -Destination (Join-Path $releaseWindows
 Copy-Item -LiteralPath (Join-Path $windowsDir 'img2bin_pack.json') -Destination (Join-Path $releaseWindowsDir 'img2bin_pack.json') -Force
 Copy-Item -Path (Join-Path $windowsDir 'examples\*') -Destination $releaseExamplesDir -Recurse -Force
 Copy-Item -Path (Join-Path $userDocsSourceDir '*') -Destination $releaseUserDocsDir -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $decoderSourceDir 'img2bin_decode.c') -Destination (Join-Path $releaseDecoderDir 'img2bin_decode.c') -Force
+Copy-Item -LiteralPath (Join-Path $decoderSourceDir 'img2bin_decode.h') -Destination (Join-Path $releaseDecoderDir 'img2bin_decode.h') -Force
 
 foreach ($folderName in $inputFolderNames) {
   $sampleSource = Join-Path $repoRoot $folderName
