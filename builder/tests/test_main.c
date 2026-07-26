@@ -27,6 +27,12 @@
 #include "format.h"
 #include "image_io.h"
 #include "imprle_encoder.h"
+#include "pack_codegen.h"
+#include "pack_config.h"
+#include "pack_discovery.h"
+#include "pack_json.h"
+#include "pack_run.h"
+#include "pack_util.h"
 #include "qoi_encoder.h"
 #include "raw_encoder.h"
 #include "rle_encoder.h"
@@ -1830,6 +1836,391 @@ static void test_indexqoi_cli_and_manifest(void)
   free(manifest_text);
 }
 
+static void test_pack_json_parser(void)
+{
+  char error[256];
+  img2bin_pack_json_value_t *root = NULL;
+  const img2bin_pack_json_value_t *list = NULL;
+
+  root = img2bin_pack_json_parse(
+    "{\"a\": 1, \"b\": [true, false, null, \"x\\ny\", 2.5], \"c\": {\"d\": \"中文\", \"e\": \"\\u4e2d\"}, \"f\": -3}",
+    error,
+    sizeof(error));
+  TEST_ASSERT(root != NULL, "Pack JSON parser rejected a valid document.");
+  TEST_ASSERT(img2bin_pack_json_number_at(root, "a", 0.0) == 1.0, "Pack JSON number lookup failed.");
+  TEST_ASSERT(img2bin_pack_json_number_at(root, "f", 0.0) == -3.0, "Pack JSON negative number lookup failed.");
+  TEST_ASSERT(strcmp(img2bin_pack_json_string_at(root, "c.d", ""), "中文") == 0, "Pack JSON UTF-8 string lookup failed.");
+  TEST_ASSERT(strcmp(img2bin_pack_json_string_at(root, "c.e", ""), "中") == 0, "Pack JSON unicode escape decoding failed.");
+  list = img2bin_pack_json_path_get(root, "b");
+  TEST_ASSERT(list != NULL && list->type == IMG2BIN_PACK_JSON_ARRAY && list->member_count == 5, "Pack JSON array parsing failed.");
+  TEST_ASSERT(list->member_values[0]->type == IMG2BIN_PACK_JSON_BOOL && list->member_values[0]->bool_value == 1, "Pack JSON true parsing failed.");
+  TEST_ASSERT(list->member_values[2]->type == IMG2BIN_PACK_JSON_NULL, "Pack JSON null parsing failed.");
+  TEST_ASSERT(strcmp(list->member_values[3]->string_value, "x\ny") == 0, "Pack JSON escape parsing failed.");
+  img2bin_pack_json_free(root);
+
+  TEST_ASSERT(img2bin_pack_json_parse("{} x", error, sizeof(error)) == NULL, "Pack JSON parser accepted trailing characters.");
+  TEST_ASSERT(img2bin_pack_json_parse("{bad}", error, sizeof(error)) == NULL, "Pack JSON parser accepted an invalid document.");
+}
+
+static void test_pack_bin_name_parsing(void)
+{
+  img2bin_pack_bin_info_t info;
+
+  TEST_ASSERT(img2bin_pack_parse_bin_name("screen_rgb565_raw_be_36x45.bin", &info), "Pack failed to parse a standard bin name.");
+  TEST_ASSERT(strcmp(info.stem, "screen") == 0, "Pack parsed the wrong stem.");
+  TEST_ASSERT(strcmp(info.format_name, "rgb565") == 0, "Pack parsed the wrong format.");
+  TEST_ASSERT(strcmp(info.algorithm, "raw") == 0, "Pack parsed the wrong algorithm.");
+  TEST_ASSERT(strcmp(info.endianness, "be") == 0, "Pack parsed the wrong endianness.");
+  TEST_ASSERT(info.width == 36 && info.height == 45, "Pack parsed the wrong dimensions.");
+
+  TEST_ASSERT(img2bin_pack_parse_bin_name("my_icon_argb8888_qoi_le_10x20.bin", &info), "Pack failed to parse an underscored stem.");
+  TEST_ASSERT(strcmp(info.stem, "my_icon") == 0, "Pack mis-split an underscored stem.");
+  TEST_ASSERT(strcmp(info.algorithm, "qoi") == 0 && strcmp(info.endianness, "le") == 0, "Pack mis-parsed tokens of an underscored name.");
+
+  TEST_ASSERT(img2bin_pack_parse_bin_name("C:\\somewhere\\deep\\screen_rgb565_imprle_be_1x1.bin", &info), "Pack failed to parse a full path.");
+  TEST_ASSERT(strcmp(info.algorithm, "imprle") == 0, "Pack mis-parsed the algorithm from a full path.");
+
+  TEST_ASSERT(!img2bin_pack_parse_bin_name("screen_rgb565_raw_be_36x.bin", &info), "Pack accepted malformed dimensions.");
+  TEST_ASSERT(!img2bin_pack_parse_bin_name("screen_rgb565_raw_xx_36x45.bin", &info), "Pack accepted a bad endianness token.");
+  TEST_ASSERT(!img2bin_pack_parse_bin_name("screen_nosuchfmt_raw_be_36x45.bin", &info), "Pack accepted an unknown pixel format.");
+  TEST_ASSERT(!img2bin_pack_parse_bin_name("rgb565_raw_be_1x1.bin", &info), "Pack accepted an empty stem.");
+  TEST_ASSERT(!img2bin_pack_parse_bin_name("screen_rgb565_raw_be_36x45.txt", &info), "Pack accepted a non-bin extension.");
+}
+
+static void test_pack_symbol_sanitize(void)
+{
+  char symbol[64];
+
+  TEST_ASSERT(img2bin_pack_sanitize_symbol("a (1)", symbol, sizeof(symbol)), "Pack failed to sanitize a symbol.");
+  TEST_ASSERT(strcmp(symbol, "a__1_") == 0, "Pack sanitized symbol mismatch.");
+
+  TEST_ASSERT(img2bin_pack_sanitize_symbol("9lives", symbol, sizeof(symbol)), "Pack failed to sanitize a leading digit.");
+  TEST_ASSERT(strcmp(symbol, "img_9lives") == 0, "Pack leading-digit symbol mismatch.");
+
+  TEST_ASSERT(img2bin_pack_sanitize_symbol("中文", symbol, sizeof(symbol)), "Pack failed to sanitize non-ASCII input.");
+  TEST_ASSERT(strcmp(symbol, "______") == 0, "Pack non-ASCII symbol mismatch.");
+
+  TEST_ASSERT(img2bin_pack_sanitize_symbol("", symbol, sizeof(symbol)), "Pack failed to sanitize an empty name.");
+  TEST_ASSERT(strcmp(symbol, "img") == 0, "Pack empty-name symbol mismatch.");
+}
+
+static void test_pack_codegen_combined_golden(void)
+{
+  char stage[IMG2BIN_PATH_CAPACITY];
+  char bin_path[IMG2BIN_PATH_CAPACITY];
+  char generated_path[IMG2BIN_PATH_CAPACITY];
+  char expected[4096];
+  char error[512];
+  img2bin_string_list_t bin_paths;
+  img2bin_string_list_t generated;
+  char *text = NULL;
+  const unsigned char alpha_bytes[2] = { 0x12, 0x34 };
+  unsigned char beta_bytes[13];
+  size_t index = 0;
+
+  memset(&bin_paths, 0, sizeof(bin_paths));
+  memset(&generated, 0, sizeof(generated));
+  for (index = 0; index < sizeof(beta_bytes); ++index) {
+    beta_bytes[index] = (unsigned char)index;
+  }
+
+  test_make_stage_directory("pack_codegen", stage, sizeof(stage));
+
+  TEST_ASSERT(img2bin_path_join(stage, "alpha_rgb565_raw_be_1x1.bin", bin_path, sizeof(bin_path)), "Could not compose alpha bin path.");
+  TEST_ASSERT(img2bin_write_file(bin_path, alpha_bytes, sizeof(alpha_bytes), error, sizeof(error)), error);
+  TEST_ASSERT(img2bin_string_list_append(&bin_paths, bin_path), "Could not record alpha bin path.");
+
+  TEST_ASSERT(img2bin_path_join(stage, "beta_argb8888_qoi_le_2x1.bin", bin_path, sizeof(bin_path)), "Could not compose beta bin path.");
+  TEST_ASSERT(img2bin_write_file(bin_path, beta_bytes, sizeof(beta_bytes), error, sizeof(error)), error);
+  TEST_ASSERT(img2bin_string_list_append(&bin_paths, bin_path), "Could not record beta bin path.");
+
+  TEST_ASSERT(img2bin_pack_generate_sources(&bin_paths, stage, NULL, &generated, error, sizeof(error)), error);
+  TEST_ASSERT(generated.count == 2, "Combined codegen should produce one header and one source.");
+
+  snprintf(
+    expected,
+    sizeof(expected),
+    "/* Generated by img2bin_pack %s. Do not edit. */\n"
+    "#ifndef IMG2BIN_PACK_IMG_RESOURCES_H\n"
+    "#define IMG2BIN_PACK_IMG_RESOURCES_H\n"
+    "\n"
+    "/* alpha_rgb565_raw_be_1x1.bin */\n"
+    "#define ALPHA_RGB565_RAW_BE_1X1_WIDTH 1u\n"
+    "#define ALPHA_RGB565_RAW_BE_1X1_HEIGHT 1u\n"
+    "#define ALPHA_RGB565_RAW_BE_1X1_SIZE 2u\n"
+    "extern const unsigned char alpha_rgb565_raw_be_1x1[2];\n"
+    "\n"
+    "/* beta_argb8888_qoi_le_2x1.bin */\n"
+    "#define BETA_ARGB8888_QOI_LE_2X1_WIDTH 2u\n"
+    "#define BETA_ARGB8888_QOI_LE_2X1_HEIGHT 1u\n"
+    "#define BETA_ARGB8888_QOI_LE_2X1_SIZE 13u\n"
+    "extern const unsigned char beta_argb8888_qoi_le_2x1[13];\n"
+    "\n"
+    "#endif\n",
+    IMG2BIN_VERSION_TEXT);
+
+  TEST_ASSERT(img2bin_path_join(stage, "img_resources.h", generated_path, sizeof(generated_path)), "Could not compose generated header path.");
+  text = test_read_text_file(generated_path);
+  TEST_ASSERT(text != NULL, "Combined header was not generated.");
+  TEST_ASSERT(strcmp(text, expected) == 0, "Combined header content mismatch.");
+  free(text);
+
+  snprintf(
+    expected,
+    sizeof(expected),
+    "/* Generated by img2bin_pack %s. Do not edit. */\n"
+    "#include \"img_resources.h\"\n"
+    "\n"
+    "/* alpha_rgb565_raw_be_1x1.bin: format=rgb565 algorithm=raw endianness=be width=1 height=1 bytes=2 */\n"
+    "const unsigned char alpha_rgb565_raw_be_1x1[2] = {\n"
+    "  0x12, 0x34\n"
+    "};\n"
+    "\n"
+    "/* beta_argb8888_qoi_le_2x1.bin: format=argb8888 algorithm=qoi endianness=le width=2 height=1 bytes=13 */\n"
+    "const unsigned char beta_argb8888_qoi_le_2x1[13] = {\n"
+    "  0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,\n"
+    "  0x0C\n"
+    "};\n"
+    "\n",
+    IMG2BIN_VERSION_TEXT);
+
+  TEST_ASSERT(img2bin_path_join(stage, "img_resources.c", generated_path, sizeof(generated_path)), "Could not compose generated source path.");
+  text = test_read_text_file(generated_path);
+  TEST_ASSERT(text != NULL, "Combined source was not generated.");
+  TEST_ASSERT(strcmp(text, expected) == 0, "Combined source content mismatch.");
+  free(text);
+
+  img2bin_string_list_free(&bin_paths);
+  img2bin_string_list_free(&generated);
+}
+
+static void test_pack_codegen_split_mode(void)
+{
+  char stage[IMG2BIN_PATH_CAPACITY];
+  char bin_path[IMG2BIN_PATH_CAPACITY];
+  char generated_path[IMG2BIN_PATH_CAPACITY];
+  char error[512];
+  img2bin_pack_codegen_options_t options;
+  img2bin_string_list_t bin_paths;
+  img2bin_string_list_t generated;
+  char *text = NULL;
+  const unsigned char bytes[3] = { 1, 2, 3 };
+
+  memset(&bin_paths, 0, sizeof(bin_paths));
+  memset(&generated, 0, sizeof(generated));
+
+  test_make_stage_directory("pack_codegen_split", stage, sizeof(stage));
+
+  TEST_ASSERT(img2bin_path_join(stage, "logo_rgb332_rle_be_4x4.bin", bin_path, sizeof(bin_path)), "Could not compose split bin path.");
+  TEST_ASSERT(img2bin_write_file(bin_path, bytes, sizeof(bytes), error, sizeof(error)), error);
+  TEST_ASSERT(img2bin_string_list_append(&bin_paths, bin_path), "Could not record split bin path.");
+
+  img2bin_pack_codegen_options_init(&options);
+  options.split = 1;
+
+  TEST_ASSERT(img2bin_pack_generate_sources(&bin_paths, stage, &options, &generated, error, sizeof(error)), error);
+  TEST_ASSERT(generated.count == 2, "Split codegen should produce one pair per bin.");
+
+  TEST_ASSERT(img2bin_path_join(stage, "logo_rgb332_rle_be_4x4.h", generated_path, sizeof(generated_path)), "Could not compose split header path.");
+  text = test_read_text_file(generated_path);
+  TEST_ASSERT(text != NULL, "Split header was not generated.");
+  TEST_ASSERT(strstr(text, "#ifndef IMG2BIN_PACK_LOGO_RGB332_RLE_BE_4X4_H") != NULL, "Split header guard mismatch.");
+  TEST_ASSERT(strstr(text, "extern const unsigned char logo_rgb332_rle_be_4x4[3];") != NULL, "Split header extern mismatch.");
+  free(text);
+
+  TEST_ASSERT(img2bin_path_join(stage, "logo_rgb332_rle_be_4x4.c", generated_path, sizeof(generated_path)), "Could not compose split source path.");
+  text = test_read_text_file(generated_path);
+  TEST_ASSERT(text != NULL, "Split source was not generated.");
+  TEST_ASSERT(strstr(text, "#include \"logo_rgb332_rle_be_4x4.h\"") != NULL, "Split source include mismatch.");
+  free(text);
+
+  img2bin_string_list_free(&bin_paths);
+  img2bin_string_list_free(&generated);
+}
+
+static void test_pack_config_parsing(void)
+{
+  char stage[IMG2BIN_PATH_CAPACITY];
+  char config_path[IMG2BIN_PATH_CAPACITY];
+  char error[512];
+  img2bin_pack_config_t *config = NULL;
+  const img2bin_pack_folder_rule_t *rule = NULL;
+  const char *config_json =
+    "{\n"
+    "  \"root\": \"..\",\n"
+    "  \"output\": \"out\",\n"
+    "  \"tools_dir\": \"tools\",\n"
+    "  \"defaults\": { \"formats\": [\"rgb565\", \"argb8888\"], \"endianness\": \"little\", \"bg_color\": \"FF00FF\", \"index_interval\": 256 },\n"
+    "  \"codegen\": { \"enabled\": true, \"mode\": \"split\", \"base_name\": \"assets\" },\n"
+    "  \"folders\": {\n"
+    "    \"input2qoi\": { \"formats\": \"all\", \"endianness\": \"big\" },\n"
+    "    \"my_icons\": { \"tool\": \"qoi\", \"bg_color\": \"112233\", \"output\": \"icons_out\", \"index_interval\": 64 }\n"
+    "  }\n"
+    "}\n";
+  const char *invalid_json = "{ \"defaults\": { \"endianness\": \"middle\" } }";
+
+  config = (img2bin_pack_config_t *)calloc(1, sizeof(*config));
+  TEST_ASSERT(config != NULL, "Could not allocate pack config.");
+
+  test_make_stage_directory("pack_config", stage, sizeof(stage));
+  TEST_ASSERT(img2bin_path_join(stage, "img2bin_pack.json", config_path, sizeof(config_path)), "Could not compose config path.");
+  TEST_ASSERT(img2bin_write_file(config_path, (const unsigned char *)config_json, strlen(config_json), error, sizeof(error)), error);
+
+  img2bin_pack_config_init(config);
+  TEST_ASSERT(img2bin_pack_config_load_file(config, config_path, error, sizeof(error)), error);
+  TEST_ASSERT(strcmp(config->root, "..") == 0, "Config root mismatch.");
+  TEST_ASSERT(strcmp(config->output, "out") == 0, "Config output mismatch.");
+  TEST_ASSERT(strcmp(config->tools_dir, "tools") == 0, "Config tools_dir mismatch.");
+  TEST_ASSERT(strcmp(config->formats, "rgb565,argb8888") == 0, "Config formats mismatch.");
+  TEST_ASSERT(config->endianness == IMG2BIN_ENDIAN_LITTLE, "Config endianness mismatch.");
+  TEST_ASSERT(strcmp(config->bg_color, "FF00FF") == 0, "Config bg_color mismatch.");
+  TEST_ASSERT(config->index_interval == 256, "Config index_interval mismatch.");
+  TEST_ASSERT(config->codegen_split == 1, "Config codegen mode mismatch.");
+  TEST_ASSERT(strcmp(config->codegen_base_name, "assets") == 0, "Config codegen base name mismatch.");
+  TEST_ASSERT(config->folder_rule_count == 2, "Config folder rule count mismatch.");
+
+  rule = img2bin_pack_config_find_rule(config, "INPUT2QOI");
+  TEST_ASSERT(rule != NULL, "Config folder lookup should be case-insensitive.");
+  TEST_ASSERT(strcmp(rule->formats, "all") == 0, "Config folder formats mismatch.");
+  TEST_ASSERT(rule->endianness == IMG2BIN_ENDIAN_BIG, "Config folder endianness mismatch.");
+
+  rule = img2bin_pack_config_find_rule(config, "my_icons");
+  TEST_ASSERT(rule != NULL, "Config custom folder rule is missing.");
+  TEST_ASSERT(strcmp(rule->tool, "qoi") == 0, "Config folder tool mismatch.");
+  TEST_ASSERT(strcmp(rule->bg_color, "112233") == 0, "Config folder bg_color mismatch.");
+  TEST_ASSERT(strcmp(rule->output, "icons_out") == 0, "Config folder output mismatch.");
+  TEST_ASSERT(rule->index_interval == 64, "Config folder index_interval mismatch.");
+
+  TEST_ASSERT(img2bin_write_file(config_path, (const unsigned char *)invalid_json, strlen(invalid_json), error, sizeof(error)), error);
+  img2bin_pack_config_init(config);
+  TEST_ASSERT(!img2bin_pack_config_load_file(config, config_path, error, sizeof(error)), "Config with invalid endianness must be rejected.");
+
+  free(config);
+}
+
+static void test_pack_info_json(void)
+{
+  char buffer[16384];
+  char error[256];
+  img2bin_pack_json_value_t *parsed = NULL;
+
+  TEST_ASSERT(img2bin_pack_get_info_json(buffer, sizeof(buffer)), "Pack info JSON did not fit the buffer.");
+  TEST_ASSERT(strstr(buffer, "\"id\": \"img2bin_pack\"") != NULL, "Pack info JSON is missing the tool id.");
+  TEST_ASSERT(strstr(buffer, "\"kind\": \"batch_orchestrator\"") != NULL, "Pack info JSON is missing the tool kind.");
+  TEST_ASSERT(strstr(buffer, "input2<algorithm_code>") != NULL, "Pack info JSON is missing the folder convention.");
+
+  parsed = img2bin_pack_json_parse(buffer, error, sizeof(error));
+  TEST_ASSERT(parsed != NULL, "Pack info JSON is not valid JSON.");
+  img2bin_pack_json_free(parsed);
+}
+
+static void test_pack_discovery_finds_tools(void)
+{
+  char binary_dir[IMG2BIN_PATH_CAPACITY];
+  char error[512];
+  img2bin_pack_tool_list_t *tools = NULL;
+  const img2bin_pack_tool_t *tool = NULL;
+
+  tools = (img2bin_pack_tool_list_t *)calloc(1, sizeof(*tools));
+  TEST_ASSERT(tools != NULL, "Could not allocate tool list.");
+
+  test_get_binary_directory(binary_dir, sizeof(binary_dir));
+  TEST_ASSERT(img2bin_pack_discover_tools(binary_dir, tools, error, sizeof(error)), error);
+  TEST_ASSERT(tools->count >= 6, "Pack should discover the six sibling tools.");
+
+  tool = img2bin_pack_find_tool(tools, "raw");
+  TEST_ASSERT(tool != NULL, "Pack did not discover img2bin_raw.");
+  TEST_ASSERT(strcmp(tool->tool_id, "img2bin_raw") == 0, "Pack discovered the wrong raw tool id.");
+  TEST_ASSERT(!tool->supports_index_interval, "raw must not support --index-interval.");
+
+  tool = img2bin_pack_find_tool(tools, "indexqoi");
+  TEST_ASSERT(tool != NULL, "Pack did not discover img2bin_indexqoi.");
+  TEST_ASSERT(tool->supports_index_interval, "indexqoi must support --index-interval.");
+
+  tool = img2bin_pack_find_tool(tools, "img2bin_qoif");
+  TEST_ASSERT(tool != NULL, "Pack did not find a tool by its id.");
+
+  free(tools);
+}
+
+static void test_pack_end_to_end(void)
+{
+  char stage[IMG2BIN_PATH_CAPACITY];
+  char binary_dir[IMG2BIN_PATH_CAPACITY];
+  char folder[IMG2BIN_PATH_CAPACITY];
+  char fixture[IMG2BIN_PATH_CAPACITY];
+  char output_dir[IMG2BIN_PATH_CAPACITY];
+  char expected_file[IMG2BIN_PATH_CAPACITY];
+  char pack_exe[IMG2BIN_PATH_CAPACITY];
+  char error[512];
+  char *text = NULL;
+  const char *argv[7];
+  int exit_code = -1;
+  const unsigned char pixels[16] = {
+    255, 0, 0, 255, 0, 255, 0, 255,
+    0, 0, 255, 255, 255, 255, 255, 255
+  };
+
+  test_make_stage_directory("pack_e2e", stage, sizeof(stage));
+  test_get_binary_directory(binary_dir, sizeof(binary_dir));
+
+  TEST_ASSERT(img2bin_path_join(stage, "input2raw", folder, sizeof(folder)), "Could not compose input2raw path.");
+  TEST_ASSERT(img2bin_make_dirs(folder, error, sizeof(error)), error);
+  TEST_ASSERT(img2bin_path_join(folder, "e2e.png", fixture, sizeof(fixture)), "Could not compose fixture path.");
+  test_write_rgba_fixture(fixture, 2, 2, pixels);
+
+  TEST_ASSERT(img2bin_path_join(stage, "input2indexqoi", folder, sizeof(folder)), "Could not compose input2indexqoi path.");
+  TEST_ASSERT(img2bin_make_dirs(folder, error, sizeof(error)), error);
+  TEST_ASSERT(img2bin_path_join(folder, "e2e.png", fixture, sizeof(fixture)), "Could not compose indexqoi fixture path.");
+  test_write_rgba_fixture(fixture, 2, 2, pixels);
+
+  TEST_ASSERT(img2bin_path_join(stage, "input2rle", folder, sizeof(folder)), "Could not compose input2rle path.");
+  TEST_ASSERT(img2bin_make_dirs(folder, error, sizeof(error)), error);
+
+#ifdef _WIN32
+  TEST_ASSERT(img2bin_path_join(binary_dir, "img2bin_pack.exe", pack_exe, sizeof(pack_exe)), "Could not compose pack exe path.");
+#else
+  TEST_ASSERT(img2bin_path_join(binary_dir, "img2bin_pack", pack_exe, sizeof(pack_exe)), "Could not compose pack exe path.");
+#endif
+
+  argv[0] = "img2bin_pack";
+  argv[1] = "--root";
+  argv[2] = stage;
+  argv[3] = "--tools";
+  argv[4] = binary_dir;
+  argv[5] = "--format";
+  argv[6] = "rgb565";
+
+  exit_code = img2bin_pack_run_with_executable_path(7, argv, pack_exe);
+  TEST_ASSERT(exit_code == 0, "Pack end-to-end run should succeed.");
+
+  TEST_ASSERT(img2bin_path_join(stage, "output", output_dir, sizeof(output_dir)), "Could not compose pack output path.");
+
+  TEST_ASSERT(img2bin_path_join(output_dir, "e2e_rgb565_raw_be_2x2.bin", expected_file, sizeof(expected_file)), "Could not compose raw bin path.");
+  TEST_ASSERT(img2bin_is_regular_file(expected_file), "Pack did not produce the raw bin output.");
+
+  TEST_ASSERT(img2bin_path_join(output_dir, "e2e_rgb565_indexqoi_be_2x2.bin", expected_file, sizeof(expected_file)), "Could not compose indexqoi bin path.");
+  TEST_ASSERT(img2bin_is_regular_file(expected_file), "Pack did not produce the indexqoi bin output.");
+
+  TEST_ASSERT(img2bin_path_join(output_dir, "img_resources.h", expected_file, sizeof(expected_file)), "Could not compose generated header path.");
+  text = test_read_text_file(expected_file);
+  TEST_ASSERT(text != NULL, "Pack did not generate the combined header.");
+  TEST_ASSERT(strstr(text, "extern const unsigned char e2e_rgb565_raw_be_2x2[") != NULL, "Generated header is missing the raw resource.");
+  TEST_ASSERT(strstr(text, "E2E_RGB565_INDEXQOI_BE_2X2_SIZE") != NULL, "Generated header is missing the indexqoi macros.");
+  free(text);
+
+  TEST_ASSERT(img2bin_path_join(output_dir, "img_resources.c", expected_file, sizeof(expected_file)), "Could not compose generated source path.");
+  TEST_ASSERT(img2bin_is_regular_file(expected_file), "Pack did not generate the combined source.");
+
+  TEST_ASSERT(img2bin_path_join(output_dir, "img2bin_pack-manifest.json", expected_file, sizeof(expected_file)), "Could not compose pack manifest path.");
+  text = test_read_text_file(expected_file);
+  TEST_ASSERT(text != NULL, "Pack did not write its manifest.");
+  TEST_ASSERT(strstr(text, "\"folder\": \"input2raw\"") != NULL, "Pack manifest is missing the raw folder entry.");
+  TEST_ASSERT(strstr(text, "\"status\": \"success\"") != NULL, "Pack manifest is missing a success entry.");
+  TEST_ASSERT(strstr(text, "\"status\": \"skipped_empty\"") != NULL, "Pack manifest is missing the skipped folder entry.");
+  free(text);
+}
+
 #ifdef _WIN32
 static void test_windows_icon_resource_for_executable(const char *exe_name)
 {
@@ -1927,6 +2318,15 @@ int main(void)
   test_qoi_cli_and_manifest();
   test_qoif_cli_and_manifest();
   test_indexqoi_cli_and_manifest();
+  test_pack_json_parser();
+  test_pack_bin_name_parsing();
+  test_pack_symbol_sanitize();
+  test_pack_codegen_combined_golden();
+  test_pack_codegen_split_mode();
+  test_pack_config_parsing();
+  test_pack_info_json();
+  test_pack_discovery_finds_tools();
+  test_pack_end_to_end();
 #ifdef _WIN32
   test_windows_icon_resource_for_executable("img2bin_raw.exe");
   test_windows_icon_resource_for_executable("img2bin_imprle.exe");
@@ -1940,6 +2340,7 @@ int main(void)
   test_windows_version_resource_for_executable("img2bin_qoi.exe");
   test_windows_version_resource_for_executable("img2bin_qoif.exe");
   test_windows_version_resource_for_executable("img2bin_indexqoi.exe");
+  test_windows_version_resource_for_executable("img2bin_pack.exe");
 #endif
 
   if (g_test_failures != 0) {

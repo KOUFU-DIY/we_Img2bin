@@ -135,6 +135,22 @@ target_include_directories(img2bin_qoi_algo
 )
 target_link_libraries(img2bin_qoi_algo PUBLIC img2bin_core)
 
+add_library(img2bin_pack_core STATIC
+  src/pack/pack_codegen.c
+  src/pack/pack_config.c
+  src/pack/pack_discovery.c
+  src/pack/pack_json.c
+  src/pack/pack_process.c
+  src/pack/pack_run.c
+  src/pack/pack_util.c
+)
+target_include_directories(img2bin_pack_core
+  PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/pack"
+)
+target_link_libraries(img2bin_pack_core PUBLIC img2bin_core)
+
 add_library(img2bin_raw_app STATIC
   src/apps/img2bin_raw/app.c
 )
@@ -297,6 +313,20 @@ if(WIN32)
 endif()
 target_link_libraries(img2bin_indexqoi PRIVATE img2bin_indexqoi_app)
 
+add_executable(img2bin_pack
+  src/apps/img2bin_pack/main.c
+)
+if(WIN32)
+  img2bin_add_windows_resources(
+    img2bin_pack
+    FILE_DESCRIPTION "img2bin_pack"
+    INTERNAL_NAME "img2bin_pack"
+    ORIGINAL_FILENAME "img2bin_pack.exe"
+    PRODUCT_NAME "img2bin_pack"
+  )
+endif()
+target_link_libraries(img2bin_pack PRIVATE img2bin_pack_core)
+
 add_executable(img2bin_tests
   tests/test_main.c
 )
@@ -313,10 +343,12 @@ target_include_directories(img2bin_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_qoi"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_qoif"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_indexqoi"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pack"
   "${IMG2BIN_THIRD_PARTY_DIR}"
 )
 target_compile_definitions(img2bin_tests PRIVATE IMG2BIN_SOURCE_DIR="${IMG2BIN_SOURCE_DIR_CMAKE}")
-target_link_libraries(img2bin_tests PRIVATE img2bin_raw_app img2bin_imprle_app img2bin_rle_app img2bin_qoi_app img2bin_qoif_app img2bin_indexqoi_app)
+target_link_libraries(img2bin_tests PRIVATE img2bin_raw_app img2bin_imprle_app img2bin_rle_app img2bin_qoi_app img2bin_qoif_app img2bin_indexqoi_app img2bin_pack_core)
+add_dependencies(img2bin_tests img2bin_raw img2bin_imprle img2bin_rle img2bin_qoi img2bin_qoif img2bin_indexqoi img2bin_pack)
 if(WIN32)
   target_link_libraries(img2bin_tests PRIVATE version)
 endif()
