@@ -10,7 +10,9 @@
 
 - `--info` 输出到 stdout，manifest 写入输出目录，均为 UTF-8 JSON
 - 错误 JSON 输出到 **stderr**，每条一行；批处理中每张失败图片各输出一行（NDJSON）
-- 版本字段随 `version.h` 演进；`schema_version` 当前为 `1.2.0`（1.2.0 起：`pixel_formats[]` 新增 `bits_per_pixel` 与 `is_alpha_only` 字段，且格式列表**按工具而异**——Alpha 蒙版格式只出现在 `img2bin_raw` 的列表中）
+- 版本字段随 `version.h` 演进；`schema_version` 当前为 `1.3.0`
+  - 1.2.0 起：`pixel_formats[]` 新增 `bits_per_pixel` 与 `is_alpha_only` 字段，且格式列表**按工具而异**——Alpha 蒙版格式只出现在 `img2bin_raw` 的列表中
+  - 1.3.0 起：manifest **默认不写出**，需显式传 `--manifest`；`invocation.arguments[]` 新增 `--manifest` 项；manifest 的 `outputs[]` 新增 `payload_bytes`、`raw_payload_bytes`、`compression_percent`（体积率）三个字段
 
 二进制侧的机器接口（6 字节通用资源头、算法/像素格式 nibble 编码表）见
 [协议与验证说明](README-protocol.md)的"通用资源头"一节。
@@ -96,7 +98,8 @@ Alpha 蒙版 payload 大小按行计算：`行字节数 = (宽 × bits_per_pixel
 
 ## 二、取模工具 manifest（`img2bin_<工具>-manifest.json`）
 
-目录批处理时写入输出目录。
+**默认不写出**（1.3.0 起）；显式传 `--manifest` 后写入输出目录（任何运行形态
+——单文件、目录批处理、默认目录、拖拽——都会写）。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -116,9 +119,25 @@ Alpha 蒙版 payload 大小按行计算：`行字节数 = (宽 × bits_per_pixel
   "source_path": "…",
   "status": "success",
   "width": 128, "height": 64,
-  "outputs": [ { "format": "rgb565", "path": "…", "bytes": 16384 } ]
+  "outputs": [ {
+    "format": "rgb565",
+    "path": "…",
+    "bytes": 16390,
+    "payload_bytes": 16384,
+    "raw_payload_bytes": 16384,
+    "compression_percent": 100.0
+  } ]
 }
 ```
+
+`outputs[]` 逐字段（1.3.0 起新增后三项）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `bytes` | number | 落盘文件总字节（含 6 字节通用资源头） |
+| `payload_bytes` | number | 算法 payload 字节（不含通用资源头） |
+| `raw_payload_bytes` | number | 同格式 RAW payload 字节（体积率分母） |
+| `compression_percent` | number | `payload_bytes / raw_payload_bytes × 100`，保留 1 位小数 |
 
 `items[]` 失败项：
 

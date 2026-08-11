@@ -1234,6 +1234,7 @@ static void test_info_json(void)
   TEST_ASSERT(strstr(json, "\"style\": \"flag_cli\"") != NULL, "Info JSON missing invocation style.");
   TEST_ASSERT(strstr(json, "\"help_flag\": \"--help\"") != NULL, "Info JSON missing help flag.");
   TEST_ASSERT(strstr(json, "\"id\": \"little_endian\"") != NULL, "Info JSON missing little-endian argument metadata.");
+  TEST_ASSERT(strstr(json, "\"flag\": \"--manifest\"") != NULL, "Info JSON missing manifest argument metadata.");
   TEST_ASSERT(strstr(json, "\"value_type\": \"hex_rgb\"") != NULL, "Info JSON missing bg_color value type.");
   TEST_ASSERT(strstr(json, "\"default\": \"exe_dir/input\"") != NULL, "Info JSON missing default input path.");
   TEST_ASSERT(strstr(json, "\"default\": \"exe_dir/output\"") != NULL, "Info JSON missing default output path.");
@@ -1383,7 +1384,7 @@ static void test_cli_default_mode_and_unicode_paths(void)
   TEST_ASSERT(img2bin_path_join(default_output_dir, "sample_rgb565_raw_be_1x1.bin", expected_output, sizeof(expected_output)), "Could not compose expected RGB565 output.");
   TEST_ASSERT(img2bin_path_join(default_output_dir, "img2bin_raw-manifest.json", default_manifest, sizeof(default_manifest)), "Could not compose default manifest path.");
   TEST_ASSERT(img2bin_is_regular_file(expected_output), "Default RGB565 output file was not created.");
-  TEST_ASSERT(img2bin_is_regular_file(default_manifest), "Default batch run should create a manifest file.");
+  TEST_ASSERT(!img2bin_is_regular_file(default_manifest), "Manifest logging is off by default and must not be written without --manifest.");
 
   TEST_ASSERT(img2bin_path_join(stage, "output", absent_output_dir, sizeof(absent_output_dir)), "Could not compose absent output directory.");
   TEST_ASSERT(img2bin_path_join(absent_output_dir, "sample_argb8888_raw_be_1x1.bin", absent_output, sizeof(absent_output)), "Could not compose absent output path.");
@@ -1635,6 +1636,7 @@ static void test_positional_batch_manifest_and_order(void)
   const unsigned char invalid_bytes[] = "broken image payload";
   const char *argv_batch[] = {
     "img2bin_raw",
+    "--manifest",
     "--output",
     NULL,
     NULL,
@@ -1663,12 +1665,12 @@ static void test_positional_batch_manifest_and_order(void)
   test_write_rgba_fixture(nested_image, 1, 1, pixel);
   TEST_ASSERT(img2bin_write_file(corrupt_image, invalid_bytes, sizeof(invalid_bytes) - 1, error, sizeof(error)), error);
 
-  argv_batch[2] = output_dir;
-  argv_batch[3] = file_path;
-  argv_batch[4] = directory_path;
-  argv_batch[5] = corrupt_image;
-  argv_batch[6] = missing_path;
-  TEST_ASSERT(img2bin_raw_run_with_executable_path(7, argv_batch, exe_path) == 6, "Mixed positional batch should return exit code 6.");
+  argv_batch[3] = output_dir;
+  argv_batch[4] = file_path;
+  argv_batch[5] = directory_path;
+  argv_batch[6] = corrupt_image;
+  argv_batch[7] = missing_path;
+  TEST_ASSERT(img2bin_raw_run_with_executable_path(8, argv_batch, exe_path) == 6, "Mixed positional batch should return exit code 6.");
 
   TEST_ASSERT(img2bin_path_join(output_dir, "alpha_rgb565_raw_be_1x1.bin", alpha_output, sizeof(alpha_output)), "Could not compose alpha output path.");
   TEST_ASSERT(img2bin_path_join(output_dir, "beta_rgb565_raw_be_1x1.bin", beta_output, sizeof(beta_output)), "Could not compose beta output path.");
@@ -1684,6 +1686,9 @@ static void test_positional_batch_manifest_and_order(void)
   TEST_ASSERT(strstr(manifest_text, "\"source_images_succeeded\": 2") != NULL, "Positional manifest missing success count.");
   TEST_ASSERT(strstr(manifest_text, "\"source_images_failed\": 1") != NULL, "Positional manifest missing failure count.");
   TEST_ASSERT(strstr(manifest_text, "\"generated_bin_files_total\": 2") != NULL, "Positional manifest missing generated file count.");
+  TEST_ASSERT(strstr(manifest_text, "\"payload_bytes\": 2") != NULL, "Positional manifest missing payload byte count.");
+  TEST_ASSERT(strstr(manifest_text, "\"raw_payload_bytes\": 2") != NULL, "Positional manifest missing raw payload byte count.");
+  TEST_ASSERT(strstr(manifest_text, "\"compression_percent\": 100.0") != NULL, "Positional manifest missing compression percentage.");
   TEST_ASSERT(strstr(manifest_text, "\"status\": \"success\"") != NULL, "Positional manifest missing success item.");
   TEST_ASSERT(strstr(manifest_text, "\"status\": \"error\"") != NULL, "Positional manifest missing error item.");
   TEST_ASSERT(strstr(manifest_text, "alpha.png") != NULL, "Positional manifest missing alpha file.");
@@ -1721,6 +1726,7 @@ static void test_batch_error_json_ndjson(void)
   const unsigned char invalid_bytes[] = "not a valid image";
   const char *argv_batch[] = {
     "img2bin_raw",
+    "--manifest",
     "--input",
     NULL,
     "--output",
@@ -1744,11 +1750,11 @@ static void test_batch_error_json_ndjson(void)
   TEST_ASSERT(img2bin_write_file(bad_png_1, invalid_bytes, sizeof(invalid_bytes) - 1, error, sizeof(error)), error);
   TEST_ASSERT(img2bin_write_file(bad_png_2, invalid_bytes, sizeof(invalid_bytes) - 1, error, sizeof(error)), error);
 
-  argv_batch[2] = input_dir;
-  argv_batch[4] = output_dir;
+  argv_batch[3] = input_dir;
+  argv_batch[5] = output_dir;
   TEST_ASSERT(test_redirect_stderr_begin(stderr_path, &saved_fd), "Could not redirect stderr for batch error test.");
 
-  exit_code = img2bin_raw_run_with_executable_path(5, argv_batch, exe_path);
+  exit_code = img2bin_raw_run_with_executable_path(6, argv_batch, exe_path);
 
   TEST_ASSERT(test_redirect_stderr_end(saved_fd), "Could not restore stderr for batch error test.");
   TEST_ASSERT(exit_code == 6, "Batch processing with failures should return exit code 6.");
@@ -1871,7 +1877,8 @@ static void test_imprle_cli_and_manifest(void)
     "--output",
     NULL,
     "--format",
-    "argb8888"
+    "argb8888",
+    "--manifest"
   };
 
   memset(&image, 0, sizeof(image));
@@ -1887,7 +1894,7 @@ static void test_imprle_cli_and_manifest(void)
 
   argv_run[2] = input_dir;
   argv_run[4] = output_dir;
-  TEST_ASSERT(img2bin_imprle_run_with_executable_path(7, argv_run, exe_path) == 0, "Improved-RLE CLI directory run failed.");
+  TEST_ASSERT(img2bin_imprle_run_with_executable_path(8, argv_run, exe_path) == 0, "Improved-RLE CLI directory run failed.");
 
   TEST_ASSERT(img2bin_path_join(output_dir, "sample_argb8888_imprle_be_1x1.bin", output_path, sizeof(output_path)), "Could not compose improved-RLE output path.");
   TEST_ASSERT(img2bin_path_join(output_dir, "img2bin_imprle-manifest.json", manifest_path, sizeof(manifest_path)), "Could not compose improved-RLE manifest path.");
@@ -1938,7 +1945,8 @@ static void test_rle_cli_and_manifest(void)
     "--output",
     NULL,
     "--format",
-    "argb8888"
+    "argb8888",
+    "--manifest"
   };
 
   memset(&image, 0, sizeof(image));
@@ -1954,7 +1962,7 @@ static void test_rle_cli_and_manifest(void)
 
   argv_run[2] = input_dir;
   argv_run[4] = output_dir;
-  TEST_ASSERT(img2bin_rle_run_with_executable_path(7, argv_run, exe_path) == 0, "Original-RLE CLI directory run failed.");
+  TEST_ASSERT(img2bin_rle_run_with_executable_path(8, argv_run, exe_path) == 0, "Original-RLE CLI directory run failed.");
 
   TEST_ASSERT(img2bin_path_join(output_dir, "sample_argb8888_rle_be_1x1.bin", output_path, sizeof(output_path)), "Could not compose original-RLE output path.");
   TEST_ASSERT(img2bin_path_join(output_dir, "img2bin_rle-manifest.json", manifest_path, sizeof(manifest_path)), "Could not compose original-RLE manifest path.");
@@ -2005,7 +2013,8 @@ static void test_qoi_cli_and_manifest(void)
     "--output",
     NULL,
     "--format",
-    "argb8888"
+    "argb8888",
+    "--manifest"
   };
 
   memset(&image, 0, sizeof(image));
@@ -2021,7 +2030,7 @@ static void test_qoi_cli_and_manifest(void)
 
   argv_run[2] = input_dir;
   argv_run[4] = output_dir;
-  TEST_ASSERT(img2bin_qoi_run_with_executable_path(7, argv_run, exe_path) == 0, "Original-QOI CLI directory run failed.");
+  TEST_ASSERT(img2bin_qoi_run_with_executable_path(8, argv_run, exe_path) == 0, "Original-QOI CLI directory run failed.");
 
   TEST_ASSERT(img2bin_path_join(output_dir, "sample_argb8888_qoi_be_1x1.bin", output_path, sizeof(output_path)), "Could not compose original-QOI output path.");
   TEST_ASSERT(img2bin_path_join(output_dir, "img2bin_qoi-manifest.json", manifest_path, sizeof(manifest_path)), "Could not compose original-QOI manifest path.");
@@ -2072,7 +2081,8 @@ static void test_qoif_cli_and_manifest(void)
     "--output",
     NULL,
     "--format",
-    "argb8888"
+    "argb8888",
+    "--manifest"
   };
 
   memset(&image, 0, sizeof(image));
@@ -2088,7 +2098,7 @@ static void test_qoif_cli_and_manifest(void)
 
   argv_run[2] = input_dir;
   argv_run[4] = output_dir;
-  TEST_ASSERT(img2bin_qoif_run_with_executable_path(7, argv_run, exe_path) == 0, "Original-QOIF CLI directory run failed.");
+  TEST_ASSERT(img2bin_qoif_run_with_executable_path(8, argv_run, exe_path) == 0, "Original-QOIF CLI directory run failed.");
 
   TEST_ASSERT(img2bin_path_join(output_dir, "sample_argb8888_qoif_be_1x1.bin", output_path, sizeof(output_path)), "Could not compose original-QOIF output path.");
   TEST_ASSERT(img2bin_path_join(output_dir, "img2bin_qoif-manifest.json", manifest_path, sizeof(manifest_path)), "Could not compose original-QOIF manifest path.");
@@ -2145,7 +2155,8 @@ static void test_indexqoi_cli_and_manifest(void)
     "--format",
     "argb8888",
     "--index-interval",
-    "2"
+    "2",
+    "--manifest"
   };
 
   memset(&image, 0, sizeof(image));
@@ -2161,7 +2172,7 @@ static void test_indexqoi_cli_and_manifest(void)
 
   argv_run[2] = input_dir;
   argv_run[4] = output_dir;
-  TEST_ASSERT(img2bin_indexqoi_run_with_executable_path(9, argv_run, exe_path) == 0, "IndexQOI CLI directory run failed.");
+  TEST_ASSERT(img2bin_indexqoi_run_with_executable_path(10, argv_run, exe_path) == 0, "IndexQOI CLI directory run failed.");
 
   TEST_ASSERT(img2bin_path_join(output_dir, "sample_argb8888_indexqoi_be_3x1.bin", output_path, sizeof(output_path)), "Could not compose IndexQOI output path.");
   TEST_ASSERT(img2bin_path_join(output_dir, "img2bin_indexqoi-manifest.json", manifest_path, sizeof(manifest_path)), "Could not compose IndexQOI manifest path.");

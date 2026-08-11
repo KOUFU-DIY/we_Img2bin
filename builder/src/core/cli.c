@@ -186,6 +186,10 @@ int img2bin_parse_cli(int argc, const char *const *argv, img2bin_cli_options_t *
       options->list_formats = 1;
       return 1;
     }
+    if (strcmp(arg, "--manifest") == 0) {
+      options->write_manifest = 1;
+      continue;
+    }
     if (strcmp(arg, "--little-endian") == 0) {
       options->endianness = IMG2BIN_ENDIAN_LITTLE;
       continue;
@@ -299,13 +303,13 @@ void img2bin_print_help(void)
   printf("  --formats <list|all>       Output multiple formats, comma separated or all.\n");
   printf("  --little-endian            Output little-endian pixels.\n");
   printf("  --bg-color <RRGGBB>        Background color for non-alpha target formats.\n");
+  printf("  --manifest                 Write img2bin_raw-manifest.json into the output directory (off by default).\n");
   printf("  --info                     Print machine-readable tool metadata as JSON.\n");
   printf("  --list-formats             Print supported pixel formats.\n");
   printf("  --help                     Print this help text.\n\n");
   printf("Positional inputs:\n");
   printf("  One or more file/directory paths may be passed directly.\n");
-  printf("  On Windows, dragging files or folders onto the exe uses this mode.\n");
-  printf("  Batch runs write img2bin_raw-manifest.json into the output directory.\n\n");
+  printf("  On Windows, dragging files or folders onto the exe uses this mode.\n\n");
   printf("Default behavior with no arguments:\n");
   printf("  Input directory  : <exe_dir>/input\n");
   printf("  Output directory : <exe_dir>/output\n");

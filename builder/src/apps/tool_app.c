@@ -76,7 +76,9 @@ static void img2bin_runtime_error_set(
 typedef struct img2bin_manifest_output_s {
   char format[32];
   char path[IMG2BIN_PATH_CAPACITY];
-  size_t bytes;
+  size_t bytes;             /* 落盘文件总字节（含 6 字节通用资源头） */
+  size_t payload_bytes;     /* 算法 payload 字节（不含通用资源头） */
+  size_t raw_payload_bytes; /* 同格式 RAW payload 字节，压缩率的分母 */
 } img2bin_manifest_output_t;
 
 typedef struct img2bin_processed_image_s {
@@ -475,8 +477,13 @@ static int img2bin_manifest_write_file(
         }
         if (!img2bin_dynamic_buffer_appendf(
               &buffer,
-              ",\n          \"bytes\": %zu\n        }%s\n",
+              ",\n          \"bytes\": %zu,\n          \"payload_bytes\": %zu,\n          \"raw_payload_bytes\": %zu,\n          \"compression_percent\": %.1f\n        }%s\n",
               item->outputs[output_index].bytes,
+              item->outputs[output_index].payload_bytes,
+              item->outputs[output_index].raw_payload_bytes,
+              item->outputs[output_index].raw_payload_bytes > 0u
+                ? (double)item->outputs[output_index].payload_bytes * 100.0 / (double)item->outputs[output_index].raw_payload_bytes
+                : 0.0,
               output_index + 1 == item->output_count ? "" : ",")) {
           goto oom;
         }
@@ -722,13 +729,13 @@ static void img2bin_print_help_for_tool(const img2bin_tool_descriptor_t *tool)
   if (tool->supports_index_interval) {
     printf("  --index-interval <count>   Pixel interval for index points. Default is image width.\n");
   }
+  printf("  --manifest                 Write %s into the output directory (off by default).\n", tool->manifest_file_name);
   printf("  --info                     Print machine-readable tool metadata as JSON.\n");
   printf("  --list-formats             Print supported pixel formats.\n");
   printf("  --help                     Print this help text.\n\n");
   printf("Positional inputs:\n");
   printf("  One or more file/directory paths may be passed directly.\n");
-  printf("  On Windows, dragging files or folders onto the exe uses this mode.\n");
-  printf("  Batch runs write %s into the output directory.\n\n", tool->manifest_file_name);
+  printf("  On Windows, dragging files or folders onto the exe uses this mode.\n\n");
   printf("Default behavior with no arguments:\n");
   printf("  Input directory  : <exe_dir>/input\n");
   printf("  Output directory : <exe_dir>/output\n");
@@ -975,6 +982,26 @@ int img2bin_tool_get_info_json(const img2bin_tool_descriptor_t *tool, char *buff
         buffer,
         buffer_size,
         &current,
+        "manifest",
+        "--manifest",
+        "boolean_flag",
+        0,
+        0,
+        "false",
+        "[]",
+        "写出批处理清单",
+        "Write Manifest",
+        "[]",
+        "[]",
+        "null",
+        "null",
+        0)) {
+    return 0;
+  }
+  if (!img2bin_append_argument_json(
+        buffer,
+        buffer_size,
+        &current,
         "list_formats",
         "--list-formats",
         "boolean_flag",
@@ -1158,6 +1185,8 @@ static int img2bin_process_single_image(
     const img2bin_format_info_t *format = img2bin_get_format_info(options->formats[format_index]);
     unsigned char *encoded = NULL;
     size_t encoded_size = 0;
+    size_t payload_size = 0;
+    size_t raw_payload_size = 0;
     char encode_error[512];
     char file_name[IMG2BIN_PATH_CAPACITY];
     char output_path[IMG2BIN_PATH_CAPACITY];
@@ -1246,6 +1275,8 @@ static int img2bin_process_single_image(
       unsigned char *file_data = NULL;
       size_t file_size = 0;
 
+      payload_size = encoded_size;
+
       if (!img2bin_build_resource_header(
             tool->header_algorithm_nibble,
             format->id,
@@ -1306,6 +1337,8 @@ static int img2bin_process_single_image(
       return 0;
     }
 
+    raw_payload_size = img2bin_format_payload_size(format->id, (unsigned int)image.width, (unsigned int)image.height);
+
     if (processed != NULL && processed->output_count < IMG2BIN_FMT_COUNT) {
       img2bin_set_error(
         processed->outputs[processed->output_count].format,
@@ -1318,10 +1351,23 @@ static int img2bin_process_single_image(
         "%s",
         output_path);
       processed->outputs[processed->output_count].bytes = encoded_size;
+      processed->outputs[processed->output_count].payload_bytes = payload_size;
+      processed->outputs[processed->output_count].raw_payload_bytes = raw_payload_size;
       ++processed->output_count;
     }
 
-    printf("Wrote %s\n", output_path);
+    /* 体积率 = 算法 payload / 同格式 RAW payload（通用头两边恒定 6 字节，不计入） */
+    if (raw_payload_size > 0u) {
+      printf(
+        "Wrote %s (%zu bytes, payload %zu / raw %zu = %.1f%%)\n",
+        output_path,
+        encoded_size,
+        payload_size,
+        raw_payload_size,
+        (double)payload_size * 100.0 / (double)raw_payload_size);
+    } else {
+      printf("Wrote %s (%zu bytes)\n", output_path, encoded_size);
+    }
   }
 
   img2bin_free_image(&image);
@@ -1521,35 +1567,10 @@ static int img2bin_process_root_input(
   }
 }
 
-static int img2bin_should_write_manifest(
-  const img2bin_cli_options_t *options,
-  int using_default_input)
+/* manifest 日志默认关闭：只有显式传 --manifest 才写（任何运行形态均生效）。 */
+static int img2bin_should_write_manifest(const img2bin_cli_options_t *options)
 {
-  size_t index = 0;
-
-  if (using_default_input) {
-    return 1;
-  }
-
-  if (options == NULL) {
-    return 0;
-  }
-
-  if (options->input_path != NULL) {
-    return img2bin_is_directory(options->input_path);
-  }
-
-  if (options->positional_input_count > 1) {
-    return 1;
-  }
-
-  for (index = 0; index < options->positional_input_count; ++index) {
-    if (img2bin_is_directory(options->positional_inputs[index])) {
-      return 1;
-    }
-  }
-
-  return 0;
+  return options != NULL && options->write_manifest;
 }
 
 static int img2bin_process_run_inputs(
@@ -1649,7 +1670,9 @@ static int img2bin_process_run_inputs(
     return stats.first_error_exit_code != 0 ? stats.first_error_exit_code : IMG2BIN_APP_EXIT_INPUT_ERROR;
   }
 
-  if (using_default_input && write_manifest && stats.source_image_success_count == 0) {
+  /* 默认 input 目录存在但没有任何成功产出：维持既有的输入错误退出码
+     （历史上该判断挂在 manifest 开关上；manifest 改为默认关闭后独立保留）。 */
+  if (using_default_input && stats.source_image_success_count == 0) {
     return stats.first_error_exit_code != 0 ? stats.first_error_exit_code : IMG2BIN_APP_EXIT_INPUT_ERROR;
   }
 
@@ -1987,7 +2010,7 @@ int img2bin_tool_run_with_executable_path(
   }
 
   using_default_input = options.input_path == NULL && options.positional_input_count == 0;
-  write_manifest = img2bin_should_write_manifest(&options, using_default_input);
+  write_manifest = img2bin_should_write_manifest(&options);
 
   if (options.output_path != NULL) {
     if (strlen(options.output_path) + 1 > sizeof(output_path)) {

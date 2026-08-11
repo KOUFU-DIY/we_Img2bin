@@ -9,7 +9,8 @@
 - 默认大端模式
 - 工具默认从 exe 同目录的 `input` 文件夹读取
 - 支持双击运行、拖拽输入和命令行调用
-- 批处理模式会输出 `manifest.json`
+- 每个 `.bin` 写出时都会在控制台报告体积率（压缩后 payload / RAW payload）
+- 传 `--manifest` 时输出 `manifest.json` 运行清单（默认关闭）
 
 ## 文档导航
 
@@ -91,7 +92,7 @@ screen_argb8888_indexqoi_be_36x45.bin
 
 ## 批处理结果文件
 
-当你处理目录、拖拽多个输入，或显式进行批处理时，工具会在输出目录中生成结果清单：
+显式传 `--manifest` 时（默认关闭），工具会在输出目录中生成结果清单：
 
 - `img2bin_raw-manifest.json`
 - `img2bin_imprle-manifest.json`

@@ -67,7 +67,8 @@ img2bin tools __VERSION_TEXT__
   img2bin_raw.exe --input input --output output
   img2bin_raw.exe --info
 
-- 批处理时每个工具会在输出目录生成 img2bin_<工具>-manifest.json
+- 每个 .bin 写出时控制台会报告体积率(压缩后 payload / RAW payload)
+- 传 --manifest 时(默认关闭)工具会在输出目录生成 img2bin_<工具>-manifest.json
 
 四、支持的输入格式
 - PNG

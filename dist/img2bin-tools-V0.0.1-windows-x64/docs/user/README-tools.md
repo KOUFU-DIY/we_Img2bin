@@ -19,6 +19,7 @@
 - `--formats <all|fmt1,fmt2,...>`
 - `--little-endian`
 - `--bg-color <RRGGBB>`
+- `--manifest`（在输出目录写 `img2bin_<工具>-manifest.json` 运行清单；**默认关闭**）
 - `--help`
 - `--info`
 - `--list-formats`
@@ -30,6 +31,14 @@
 - 默认输入目录：`<exe_dir>\input`
 - 默认输出目录：`<exe_dir>\output`
 - 默认背景色：`000000`
+- 默认不写 manifest JSON 日志（需 `--manifest` 显式开启）
+
+每写出一个 `.bin`，stdout 会同时报告体积率（压缩后 payload 相对同格式
+RAW payload 的占比；两边都不含恒定 6 字节的通用资源头）：
+
+```text
+Wrote out\logo_rgb565_indexqoi_be_128x64.bin (1290 bytes, payload 1284 / raw 16384 = 7.8%)
+```
 
 ## 1. img2bin_raw.exe
 

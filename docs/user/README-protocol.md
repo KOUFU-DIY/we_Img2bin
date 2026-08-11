@@ -45,7 +45,8 @@
 当前工具输出：
 
 - `.bin` 文件 = **6 字节通用资源头 + 算法 payload**
-- 批处理 `manifest.json`
+- 每个 `.bin` 写出时 stdout 报告体积率（压缩后 payload / 同格式 RAW payload）
+- 显式传 `--manifest` 时输出运行清单 `manifest.json`（默认关闭）
 
 当前工具不输出：
 
@@ -136,7 +137,7 @@ Alpha 蒙版只保存透明度通道，不保存颜色，供 GUI 在运行时用
 1. 准备一张固定输入图片
 2. 记录使用的工具、命令行、像素格式、字节序
 3. 保留生成的 `.bin`
-4. 如为批处理，保留对应 `manifest.json`
+4. 如为批处理，加 `--manifest` 生成并保留对应 `manifest.json`（默认不写出）
 5. 如需程序侧检索，再保存一份 `--info` 输出
 
 例如：
@@ -167,7 +168,7 @@ Alpha 蒙版只保存透明度通道，不保存颜色，供 GUI 在运行时用
 
 如果你要做批处理流程验证，再额外保留：
 
-- `img2bin_<algo>-manifest.json`
+- `img2bin_<algo>-manifest.json`（运行时需带 `--manifest`）
 
 如果你要做跳转解码验证，再额外保留：
 

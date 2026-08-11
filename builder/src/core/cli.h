@@ -17,6 +17,9 @@ typedef struct img2bin_cli_options_s {
   int show_info;
   int list_formats;
   int index_interval_specified;
+  /* 默认 0：不写 manifest 日志；--manifest 置 1 后所有运行形态都会
+     在输出目录写 img2bin_<工具>-manifest.json。 */
+  int write_manifest;
   /* --formats all 置 1：格式清单是"全部"语义，工具骨架据此把本工具
      不支持的格式静默过滤掉；显式点名的格式不支持时则报 CLI 错误。 */
   int formats_all;
