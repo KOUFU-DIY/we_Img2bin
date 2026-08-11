@@ -2,6 +2,7 @@
 
 #include <limits.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "format.h"
 #include "util.h"
@@ -168,6 +169,55 @@ static void img2bin_write_ragb5155(img2bin_rgba_t pixel, img2bin_endianness_t en
   img2bin_write_u16(value, endianness, out);
 }
 
+/* Alpha 蒙版家族（a8/a4/a2/a1）：只取 Alpha 通道，行字节对齐 + MSB-first 打包
+   （最左像素在字节高位），行尾补位为 0，无字节序维度。与 WeGui 字体位图约定一致。 */
+static int img2bin_encode_raw_alpha_image(
+  const img2bin_format_info_t *info,
+  const img2bin_image_t *image,
+  unsigned char **out_buffer,
+  size_t *out_size,
+  char *error_buffer,
+  size_t error_buffer_size)
+{
+  unsigned int bits = (unsigned int)info->bits_per_pixel;
+  size_t width = (size_t)image->width;
+  size_t height = (size_t)image->height;
+  size_t row_stride = img2bin_format_row_stride(info->id, (unsigned int)image->width);
+  size_t total_size = img2bin_format_payload_size(info->id, (unsigned int)image->width, (unsigned int)image->height);
+  unsigned char *output = NULL;
+  size_t x = 0;
+  size_t y = 0;
+
+  if (row_stride == 0 || total_size == 0) {
+    img2bin_set_error(error_buffer, error_buffer_size, "Encoded image is too large.");
+    return 0;
+  }
+
+  output = (unsigned char *)malloc(total_size);
+  if (output == NULL) {
+    img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding image.");
+    return 0;
+  }
+  memset(output, 0, total_size);
+
+  for (y = 0; y < height; ++y) {
+    unsigned char *row = output + y * row_stride;
+
+    for (x = 0; x < width; ++x) {
+      uint8_t alpha = image->pixels[(y * width + x) * 4u + 3u];
+      uint8_t quantized = bits >= 8u ? alpha : img2bin_quantize_channel(alpha, bits);
+      size_t bit_offset = x * bits;
+      unsigned int shift = 8u - bits - (unsigned int)(bit_offset & 7u);
+
+      row[bit_offset >> 3] |= (unsigned char)(quantized << shift);
+    }
+  }
+
+  *out_buffer = output;
+  *out_size = total_size;
+  return 1;
+}
+
 int img2bin_encode_raw_image(
   img2bin_pixel_format_t format,
   img2bin_endianness_t endianness,
@@ -192,6 +242,10 @@ int img2bin_encode_raw_image(
   if (image->width <= 0 || image->height <= 0) {
     img2bin_set_error(error_buffer, error_buffer_size, "Image dimensions must be positive.");
     return 0;
+  }
+
+  if (info->is_alpha_only) {
+    return img2bin_encode_raw_alpha_image(info, image, out_buffer, out_size, error_buffer, error_buffer_size);
   }
 
   pixel_count = (size_t)image->width * (size_t)image->height;

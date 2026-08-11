@@ -11,7 +11,8 @@
 - 发布包中：`decoder\img2bin_decode.c` / `decoder\img2bin_decode.h`
 - 仓库中：`builder/src/decoder/`
 
-覆盖全部六种算法 × 九种像素格式 × 大小端，所有解码函数把压缩流还原为
+覆盖全部六种算法 × 九种彩色像素格式 × 大小端，外加四种 Alpha 蒙版格式
+（`A8/A4/A2/A1`，仅 raw 算法），所有解码函数把压缩流还原为
 RAW 打包像素字节流（与 `img2bin_raw.exe` 输出逐字节一致），并附带
 `indexQOI` 的头解析、索引读取和"从第 N 个索引点开始解码"接口。
 它在测试里对每种组合做"编码 → 解码 → 与 RAW 输出逐字节比对"的回环验证，
@@ -41,7 +42,7 @@ byte4-5 = 高，恒大端
 
 算法 nibble：`raw=0x0 rle=0x1 imprle=0x2 qoi=0x3 indexqoi=0x4 qoif=0x5`；
 像素格式 nibble：`RGB565=0x0 RGB888=0x1 RGB332=0x4 ARGB8888=0x5 ARGB6666=0x6
-ARGB4444=0x7 ARGB8565=0x8 ARGB2222=0x9 RAGB5155=0xA`。
+ARGB4444=0x7 ARGB8565=0x8 ARGB2222=0x9 RAGB5155=0xA A8=0xB A4=0xC A2=0xD A1=0xE`。
 
 解码器先读这 6 字节确定"是什么、多大"，然后从第 7 字节开始按对应算法解
 payload。本页后续章节描述的都是**去掉通用头之后的 payload**。
@@ -96,6 +97,29 @@ payload。本页后续章节描述的都是**去掉通用头之后的 payload**�
 1. 根据像素格式确定每像素字节数
 2. 逐像素读取固定长度字节组
 3. 按 [像素格式说明](README-formats.md) 解包
+
+## Alpha 蒙版（A8/A4/A2/A1）的 RAW 解码
+
+Alpha 蒙版只出现在 raw 算法下（头里出现其他算法 nibble 的组合是非法流），
+payload 是**按行打包**的位流而不是逐像素字节组：
+
+```text
+行字节数 row_stride = (宽 × bpp + 7) / 8
+payload 大小       = 高 × row_stride
+```
+
+- 每行从新字节开始，MSB-first（最左像素在字节高位），行尾补位为 0
+- 无字节序维度，`be`/`le` 输出一致
+- 还原到 8bit alpha：`A8` 恒等；`A4` `(v<<4)|v`；`A2` `v*0x55`；`A1` `0/255`
+
+参考解码器的对应接口：
+
+- `img2bin_decode_row_stride()` / `img2bin_decode_bits_per_pixel()` 算行宽与位深
+  （注意 `img2bin_decode_bytes_per_pixel()` 对亚字节格式返回 0）
+- `img2bin_decode_raw_alpha()`：按宽高做尺寸校验的 payload 级解码
+- `img2bin_decode_image()`：文件级接口对 Alpha 蒙版自动走上面这条路径
+- 按像素数的 payload 级接口（`img2bin_decode_raw/rle/imprle/qoi/qoif/indexqoi*`）
+  对 Alpha 蒙版一律返回参数错误——像素数不足以确定行打包的 payload 大小
 
 ## 三、原始 RLE 解码
 

@@ -6,15 +6,13 @@
 
 - 每个 `exe` 对应一种压缩算法
 - 六个取模工具输出 `.bin`：6 字节通用资源头（类型 + 算法/格式码 + 宽高）+ 算法 payload
-- 统筹管理器 `img2bin_pack.exe` 可批量调度全部工具，并把 `.bin` 汇总生成 `.c/.h`
 - 默认大端模式
-- 单个工具默认从 `input` 目录读取；统筹管理器按 `input2<算法>` 文件夹分发
+- 工具默认从 exe 同目录的 `input` 文件夹读取
 - 支持双击运行、拖拽输入和命令行调用
 - 批处理模式会输出 `manifest.json`
 
 ## 文档导航
 
-- [统筹管理器说明](README-pack.md)
 - [工具说明](README-tools.md)
 - [像素格式说明](README-formats.md)
 - [解码编写说明](README-decoder.md)（含现成的 C99 参考解码器）
@@ -25,16 +23,14 @@
 
 | 程序 | 用途 |
 | --- | --- |
-| `img2bin_pack.exe` | 统筹管理器：按 `input2<算法>` 文件夹批量调度下面六个工具，并生成 `.c/.h` |
-| `img2bin_raw.exe` | 无压缩输出 |
+| `img2bin_raw.exe` | 无压缩输出（含 Alpha 蒙版格式 `a8/a4/a2/a1`） |
 | `img2bin_imprle.exe` | 改进 RLE 压缩输出 |
 | `img2bin_rle.exe` | 原始 RLE 压缩输出 |
 | `img2bin_qoi.exe` | 原始 QOI 压缩输出 |
 | `img2bin_qoif.exe` | 原始 QOI（无字典）压缩输出 |
 | `img2bin_indexqoi.exe` | 索引 QOI 压缩输出 |
 
-发布目录中，六个取模工具在 `windows\tools\`，统筹管理器在 `windows\`。
-推荐的批量用法见 [统筹管理器说明](README-pack.md)；下面是单个工具的用法。
+发布目录中，六个取模工具在 `windows\tools\`。
 
 ## 默认使用方式
 
@@ -70,8 +66,8 @@
 
 ## 你最需要先知道的几点
 
-- 六个取模工具只输出 `.bin`（6 字节通用资源头 + payload），不输出结构体文本、数组文本
-- 需要 `.c/.h` 数组时用统筹管理器 `img2bin_pack.exe`，见 [统筹管理器说明](README-pack.md)
+- 六个取模工具只输出 `.bin`（6 字节通用资源头 + payload），不输出结构体文本、数组文本；
+  需要 `.c/.h` 数组时可用任意 bin2c 类工具转换（数组内容与 `.bin` 逐字节一致即可）
 - 没有 GUI
 - 若目标格式不带 Alpha，透明区域会先按背景色混合，再转目标格式
 - `img2bin_indexqoi.exe` 默认索引间隔是图片宽度，可用 `--index-interval` 改
@@ -121,6 +117,8 @@ screen_argb8888_indexqoi_be_36x45.bin
 
 ## 输出像素格式
 
+六个工具通用的彩色格式：
+
 - `ARGB8888`
 - `ARGB6666`
 - `ARGB4444`
@@ -130,3 +128,7 @@ screen_argb8888_indexqoi_be_36x45.bin
 - `RGB565`
 - `RGB332`
 - `RAGB5155`
+
+仅 `img2bin_raw` 支持的 Alpha 蒙版格式（只存透明度，GUI 运行时染色）：
+
+- `A8`、`A4`、`A2`、`A1`

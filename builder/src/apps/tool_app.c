@@ -1027,33 +1027,53 @@ int img2bin_tool_get_info_json(const img2bin_tool_descriptor_t *tool, char *buff
     return 0;
   }
 
-  for (index = 0; index < format_count; ++index) {
-    if (!img2bin_appendf(
-          buffer,
-          buffer_size,
-          &current,
-          "    {\n"
-          "      \"name\": \"%s\",\n"
-          "      \"display_name\": {\n"
-          "        \"zh_cn\": \"%s\",\n"
-          "        \"en\": \"%s\"\n"
-          "      },\n"
-          "      \"bytes_per_pixel\": %u,\n"
-          "      \"stores_alpha\": %s,\n"
-          "      \"uses_background_color\": %s,\n"
-          "      \"endianness_affects_output\": %s,\n"
-          "      \"header_nibble\": %d\n"
-          "    }%s\n",
-          formats[index].name,
-          formats[index].display_name_zh_cn,
-          formats[index].display_name_en,
-          (unsigned int)formats[index].bytes_per_pixel,
-          formats[index].stores_alpha ? "true" : "false",
-          formats[index].uses_background_color ? "true" : "false",
-          formats[index].endianness_affects_output ? "true" : "false",
-          img2bin_get_format_header_nibble(formats[index].id),
-          index + 1 == format_count ? "" : ",")) {
-      return 0;
+  {
+    size_t supported_count = 0;
+    size_t emitted = 0;
+
+    for (index = 0; index < format_count; ++index) {
+      if (formats[index].is_alpha_only && !tool->supports_alpha_only_formats) {
+        continue;
+      }
+      ++supported_count;
+    }
+
+    for (index = 0; index < format_count; ++index) {
+      if (formats[index].is_alpha_only && !tool->supports_alpha_only_formats) {
+        continue;
+      }
+      ++emitted;
+      if (!img2bin_appendf(
+            buffer,
+            buffer_size,
+            &current,
+            "    {\n"
+            "      \"name\": \"%s\",\n"
+            "      \"display_name\": {\n"
+            "        \"zh_cn\": \"%s\",\n"
+            "        \"en\": \"%s\"\n"
+            "      },\n"
+            "      \"bytes_per_pixel\": %u,\n"
+            "      \"bits_per_pixel\": %u,\n"
+            "      \"is_alpha_only\": %s,\n"
+            "      \"stores_alpha\": %s,\n"
+            "      \"uses_background_color\": %s,\n"
+            "      \"endianness_affects_output\": %s,\n"
+            "      \"header_nibble\": %d\n"
+            "    }%s\n",
+            formats[index].name,
+            formats[index].display_name_zh_cn,
+            formats[index].display_name_en,
+            (unsigned int)formats[index].bytes_per_pixel,
+            (unsigned int)formats[index].bits_per_pixel,
+            formats[index].is_alpha_only ? "true" : "false",
+            formats[index].stores_alpha ? "true" : "false",
+            formats[index].uses_background_color ? "true" : "false",
+            formats[index].endianness_affects_output ? "true" : "false",
+            img2bin_get_format_header_nibble(formats[index].id),
+            emitted == supported_count ? "" : ",")) {
+        return 0;
+      }
     }
   }
 
@@ -1821,7 +1841,17 @@ int img2bin_tool_run_with_executable_path(
   }
 
   if (options.list_formats) {
-    img2bin_print_formats();
+    size_t format_count = 0;
+    const img2bin_format_info_t *format_infos = img2bin_get_format_infos(&format_count);
+    size_t format_index;
+
+    printf("Supported formats:\n");
+    for (format_index = 0; format_index < format_count; ++format_index) {
+      if (format_infos[format_index].is_alpha_only && !tool->supports_alpha_only_formats) {
+        continue;
+      }
+      printf("  %s\n", format_infos[format_index].name);
+    }
     return IMG2BIN_APP_EXIT_SUCCESS;
   }
 
@@ -1839,6 +1869,39 @@ int img2bin_tool_run_with_executable_path(
       "--index-interval is only available for indexed QOI tools.");
     img2bin_emit_error_json(&runtime_error);
     return runtime_error.exit_code;
+  }
+
+  /* 按工具过滤格式：显式点名不支持的格式报 CLI 错误；--formats all 静默滤除。 */
+  {
+    size_t read_index = 0;
+    size_t write_index = 0;
+
+    for (read_index = 0; read_index < options.format_count; ++read_index) {
+      const img2bin_format_info_t *format_info = img2bin_get_format_info(options.formats[read_index]);
+
+      if (format_info != NULL && (!format_info->is_alpha_only || tool->supports_alpha_only_formats)) {
+        options.formats[write_index] = options.formats[read_index];
+        ++write_index;
+        continue;
+      }
+
+      if (!options.formats_all) {
+        img2bin_runtime_error_t runtime_error;
+
+        img2bin_runtime_error_set(
+          &runtime_error,
+          "cli_parse_failed",
+          IMG2BIN_APP_EXIT_CLI_ERROR,
+          "cli",
+          NULL,
+          "当前工具不支持 Alpha 蒙版格式（a8/a4/a2/a1 仅限 raw 工具）。",
+          "This tool does not support alpha mask formats (a8/a4/a2/a1 are raw-only).",
+          format_info != NULL ? format_info->name : NULL);
+        img2bin_emit_error_json(&runtime_error);
+        return runtime_error.exit_code;
+      }
+    }
+    options.format_count = write_index;
   }
 
   if (executable_path_override != NULL) {

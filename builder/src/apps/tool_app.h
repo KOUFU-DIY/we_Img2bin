@@ -35,6 +35,9 @@ typedef struct img2bin_tool_descriptor_s {
   const char *output_token;
   const char *manifest_file_name;
   int supports_index_interval;
+  /* Alpha 蒙版家族（a8/a4/a2/a1）只在 raw 工具开放；为 0 的工具在 CLI、
+     --info、--list-formats 层面一致地不提供这些格式。 */
+  int supports_alpha_only_formats;
   unsigned int header_algorithm_nibble;
   img2bin_tool_encode_fn encode_image;
 } img2bin_tool_descriptor_t;

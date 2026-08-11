@@ -97,13 +97,6 @@ if (!(Test-Path -LiteralPath $readmeTemplatePath)) {
 if (!(Test-Path -LiteralPath $userDocsSourceDir)) {
   Fail-WithMessage '未找到用户文档目录 docs\user。'
 }
-if (!(Test-Path -LiteralPath (Join-Path $windowsDir 'img2bin_pack.json'))) {
-  Fail-WithMessage '未找到 windows\img2bin_pack.json 默认配置。'
-}
-if (!(Test-Path -LiteralPath (Join-Path $windowsDir 'examples'))) {
-  Fail-WithMessage '未找到 windows\examples 示例目录。'
-}
-
 $vsRoots = @(Get-VisualStudioRoots)
 if ($vsRoots.Count -eq 0) {
   Fail-WithMessage '未找到 Visual Studio 2022（含 C++ 构建组件），请先安装 VS Build Tools 或 Community。'
@@ -137,7 +130,6 @@ $versionText = Get-VersionMacroValue -HeaderPath $versionHeader -MacroName 'IMG2
 $versionSemver = Get-VersionMacroValue -HeaderPath $versionHeader -MacroName 'IMG2BIN_VERSION_SEMVER'
 
 $toolNames = @('raw', 'imprle', 'rle', 'qoi', 'qoif', 'indexqoi')
-$inputFolderNames = $toolNames | ForEach-Object { "input2$_" }
 
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $tempBuildRoot = Join-Path $env:LOCALAPPDATA 'Temp\img2bin_tools_build_release'
@@ -149,11 +141,9 @@ if (Test-Path -LiteralPath $releaseDir) {
 }
 $releaseWindowsDir = Join-Path $releaseDir 'windows'
 $releaseToolsDir = Join-Path $releaseWindowsDir 'tools'
-$releaseExamplesDir = Join-Path $releaseWindowsDir 'examples'
 $releaseReadmePath = Join-Path $releaseDir 'README.txt'
 $releaseDocsDir = Join-Path $releaseDir 'docs'
 $releaseUserDocsDir = Join-Path $releaseDocsDir 'user'
-$releaseOutputDir = Join-Path $releaseDir 'output'
 $releaseDecoderDir = Join-Path $releaseDir 'decoder'
 $decoderSourceDir = Join-Path $builderDir 'src\decoder'
 $repoToolsDir = Join-Path $windowsDir 'tools'
@@ -163,10 +153,7 @@ if (!(Test-Path -LiteralPath (Join-Path $decoderSourceDir 'img2bin_decode.c'))) 
   Fail-WithMessage '未找到参考解码器 builder\src\decoder\img2bin_decode.c。'
 }
 
-New-Item -ItemType Directory -Force -Path $tempBuildRoot, $buildDir, $distRoot, $releaseDir, $releaseWindowsDir, $releaseToolsDir, $releaseExamplesDir, $releaseDocsDir, $releaseOutputDir, $releaseDecoderDir, $repoToolsDir | Out-Null
-foreach ($folderName in $inputFolderNames) {
-  New-Item -ItemType Directory -Force -Path (Join-Path $releaseDir $folderName) | Out-Null
-}
+New-Item -ItemType Directory -Force -Path $tempBuildRoot, $buildDir, $distRoot, $releaseDir, $releaseWindowsDir, $releaseToolsDir, $releaseDocsDir, $releaseDecoderDir, $repoToolsDir | Out-Null
 
 if (Test-Path -LiteralPath $releaseUserDocsDir) {
   Remove-Item -LiteralPath $releaseUserDocsDir -Recurse -Force
@@ -206,10 +193,6 @@ foreach ($tool in $toolNames) {
     Fail-WithMessage "构建完成后未找到 img2bin_$tool.exe。"
   }
 }
-$builtPackExePath = Join-Path $buildDir 'bin\img2bin_pack.exe'
-if (!(Test-Path -LiteralPath $builtPackExePath)) {
-  Fail-WithMessage '构建完成后未找到 img2bin_pack.exe。'
-}
 
 $readmeTemplate = Get-Content -Path $readmeTemplatePath -Raw -Encoding UTF8
 $readmeText = $readmeTemplate.Replace('__VERSION_TEXT__', $versionText).Replace('__VERSION_SEMVER__', $versionSemver)
@@ -218,28 +201,14 @@ foreach ($tool in $toolNames) {
   Copy-Item -LiteralPath $builtExePaths[$tool] -Destination (Join-Path $repoToolsDir "img2bin_$tool.exe") -Force
   Copy-Item -LiteralPath $builtExePaths[$tool] -Destination (Join-Path $releaseToolsDir "img2bin_$tool.exe") -Force
 }
-Copy-Item -LiteralPath $builtPackExePath -Destination (Join-Path $windowsDir 'img2bin_pack.exe') -Force
-Copy-Item -LiteralPath $builtPackExePath -Destination (Join-Path $releaseWindowsDir 'img2bin_pack.exe') -Force
-Copy-Item -LiteralPath (Join-Path $windowsDir 'img2bin_pack.json') -Destination (Join-Path $releaseWindowsDir 'img2bin_pack.json') -Force
-Copy-Item -Path (Join-Path $windowsDir 'examples\*') -Destination $releaseExamplesDir -Recurse -Force
 Copy-Item -Path (Join-Path $userDocsSourceDir '*') -Destination $releaseUserDocsDir -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $decoderSourceDir 'img2bin_decode.c') -Destination (Join-Path $releaseDecoderDir 'img2bin_decode.c') -Force
 Copy-Item -LiteralPath (Join-Path $decoderSourceDir 'img2bin_decode.h') -Destination (Join-Path $releaseDecoderDir 'img2bin_decode.h') -Force
-
-foreach ($folderName in $inputFolderNames) {
-  $sampleSource = Join-Path $repoRoot $folderName
-  if (Test-Path -LiteralPath $sampleSource) {
-    Get-ChildItem -LiteralPath $sampleSource -File | Where-Object { $_.Extension -match '\.(png|bmp|jpg|jpeg)$' } | ForEach-Object {
-      Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $releaseDir $folderName) -Force
-    }
-  }
-}
 
 Set-Content -Path $releaseReadmePath -Value $readmeText -Encoding utf8
 
 Write-Host ''
 Write-Host '发布完成。'
 Write-Host "取模工具目录: $repoToolsDir"
-Write-Host "统筹管理器: $(Join-Path $windowsDir 'img2bin_pack.exe')"
 Write-Host "发布目录: $releaseDir"
 Write-Host "发布说明: $releaseReadmePath"

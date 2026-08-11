@@ -8,7 +8,8 @@
  *   - 文件级接口（推荐）：img2bin_decode_header / img2bin_decode_image /
  *     img2bin_decode_image_from_slot，输入整个 .bin 文件，按头自动分发。
  *   - payload 级接口：img2bin_decode_raw/rle/imprle/qoi/qoif/indexqoi*，
- *     输入去掉 6 字节通用头后的裸流（indexQOI 裸流自带 13 字节结构头）。
+ *     输入去掉 6 字节通用头后的裸流（indexQOI 裸流自带 13 字节结构头）；
+ *     Alpha 蒙版格式（A8/A4/A2/A1，仅 raw 算法）走 img2bin_decode_raw_alpha。
  *
  * 所有解码输出都是 RAW 打包像素字节流（不含任何头），与
  * img2bin_raw.exe 输出的 payload 在同格式、同字节序下逐字节一致。
@@ -24,6 +25,12 @@
 extern "C" {
 #endif
 
+/* A8/A4/A2/A1 是 Alpha 蒙版家族（只存透明度，仅 raw 算法）：
+   行字节对齐（行字节数 = (宽×bpp+7)/8）、MSB-first（最左像素在字节高位）、
+   行尾补位为 0、无字节序维度。解码到 8bit alpha 的扩展规则：
+   A8 恒等；A4 v→(v<<4)|v；A2 v→v*0x55；A1 v→0/255。
+   这批格式只能走文件级接口或 img2bin_decode_raw_alpha；
+   按 pixel_count 的 payload 级接口一律返回 ERR_ARGUMENTS。 */
 typedef enum img2bin_decode_format_e {
   IMG2BIN_DECODE_FMT_ARGB8888 = 0,
   IMG2BIN_DECODE_FMT_ARGB6666,
@@ -34,6 +41,10 @@ typedef enum img2bin_decode_format_e {
   IMG2BIN_DECODE_FMT_RGB565,
   IMG2BIN_DECODE_FMT_RGB332,
   IMG2BIN_DECODE_FMT_RAGB5155,
+  IMG2BIN_DECODE_FMT_A8,
+  IMG2BIN_DECODE_FMT_A4,
+  IMG2BIN_DECODE_FMT_A2,
+  IMG2BIN_DECODE_FMT_A1,
   IMG2BIN_DECODE_FMT_COUNT
 } img2bin_decode_format_t;
 
@@ -83,7 +94,24 @@ typedef struct img2bin_indexqoi_header_s {
   size_t payload_offset;
 } img2bin_indexqoi_header_t;
 
+/* 整字节格式返回每像素字节数；亚字节的 Alpha 蒙版（A4/A2/A1）返回 0。 */
 size_t img2bin_decode_bytes_per_pixel(img2bin_decode_format_t format);
+/* 每像素位数（A8/A4/A2/A1 = 8/4/2/1，其余 = 字节数×8）。 */
+size_t img2bin_decode_bits_per_pixel(img2bin_decode_format_t format);
+/* 行字节数 = (宽×每像素位数+7)/8；参数非法返回 0。 */
+size_t img2bin_decode_row_stride(img2bin_decode_format_t format, uint16_t width);
+
+/* Alpha 蒙版（A8/A4/A2/A1）raw payload 解码：行打包语义下的恒等拷贝 +
+   尺寸校验（input_size 必须精确等于 高×行字节数）。 */
+img2bin_decode_status_t img2bin_decode_raw_alpha(
+  const uint8_t *input,
+  size_t input_size,
+  img2bin_decode_format_t format,
+  uint16_t width,
+  uint16_t height,
+  uint8_t *output,
+  size_t output_capacity,
+  size_t *out_written);
 
 img2bin_decode_status_t img2bin_decode_header(
   const uint8_t *input,

@@ -28,12 +28,6 @@
 #include "image_io.h"
 #include "img2bin_decode.h"
 #include "imprle_encoder.h"
-#include "pack_codegen.h"
-#include "pack_config.h"
-#include "pack_discovery.h"
-#include "pack_json.h"
-#include "pack_run.h"
-#include "pack_util.h"
 #include "qoi_encoder.h"
 #include "raw_encoder.h"
 #include "rle_encoder.h"
@@ -460,6 +454,117 @@ static void test_alpha_edges_and_background_blend(void)
   TEST_ASSERT(img2bin_encode_raw_image(IMG2BIN_FMT_RGB888, IMG2BIN_ENDIAN_BIG, background, &image, &encoded, &encoded_size, error, sizeof(error)), error);
   test_expect_bytes(encoded, (const unsigned char[]){ 0x80, 0x00, 0x7F }, 3, "RGB888 background blend");
   free(encoded);
+}
+
+/* Alpha 蒙版黄金字节：只取 Alpha 通道（RGB 填充干扰值证明被忽略）、
+   MSB-first 行打包、行字节对齐、行尾补 0、无字节序差异。奇数宽度覆盖补位。 */
+static void test_raw_alpha_golden_values(void)
+{
+  img2bin_image_t image;
+  img2bin_rgb_t background = { 255, 255, 255 };
+  unsigned char pixels[18 * 4];
+  unsigned char *encoded = NULL;
+  unsigned char *encoded_le = NULL;
+  size_t encoded_size = 0;
+  size_t encoded_le_size = 0;
+  char error[256];
+  size_t index;
+
+  /* a8：3x2，逐字节存储原始 Alpha。 */
+  {
+    const unsigned char alphas[6] = { 0x00, 0x7F, 0xFF, 0x12, 0x80, 0xFE };
+
+    memset(pixels, 0xDE, sizeof(pixels));
+    for (index = 0; index < 6; ++index) {
+      pixels[index * 4 + 3] = alphas[index];
+    }
+    image.width = 3;
+    image.height = 2;
+    image.pixels = pixels;
+
+    TEST_ASSERT(img2bin_encode_raw_image(IMG2BIN_FMT_A8, IMG2BIN_ENDIAN_BIG, background, &image, &encoded, &encoded_size, error, sizeof(error)), error);
+    TEST_ASSERT(encoded_size == 6, "A8 payload size mismatch.");
+    test_expect_bytes(encoded, alphas, 6, "A8 identity bytes");
+    free(encoded);
+    encoded = NULL;
+  }
+
+  /* a4：5x3 奇数宽度，行 stride 3，末 nibble 补 0；量化 (a*15+127)/255。 */
+  {
+    const unsigned char alphas[15] = {
+      0, 17, 34, 255, 128,
+      51, 68, 85, 102, 119,
+      136, 153, 170, 187, 204
+    };
+    const unsigned char expected[9] = { 0x01, 0x2F, 0x80, 0x34, 0x56, 0x70, 0x89, 0xAB, 0xC0 };
+
+    memset(pixels, 0xAD, sizeof(pixels));
+    for (index = 0; index < 15; ++index) {
+      pixels[index * 4 + 3] = alphas[index];
+    }
+    image.width = 5;
+    image.height = 3;
+    image.pixels = pixels;
+
+    TEST_ASSERT(img2bin_format_row_stride(IMG2BIN_FMT_A4, 5u) == 3u, "A4 row stride mismatch.");
+    TEST_ASSERT(img2bin_format_payload_size(IMG2BIN_FMT_A4, 5u, 3u) == 9u, "A4 payload size helper mismatch.");
+    TEST_ASSERT(img2bin_encode_raw_image(IMG2BIN_FMT_A4, IMG2BIN_ENDIAN_BIG, background, &image, &encoded, &encoded_size, error, sizeof(error)), error);
+    TEST_ASSERT(encoded_size == 9, "A4 payload size mismatch.");
+    test_expect_bytes(encoded, expected, 9, "A4 odd-width packed bytes");
+
+    /* 字节序对 Alpha 蒙版无影响：le 输出必须与 be 逐字节一致。 */
+    TEST_ASSERT(img2bin_encode_raw_image(IMG2BIN_FMT_A4, IMG2BIN_ENDIAN_LITTLE, background, &image, &encoded_le, &encoded_le_size, error, sizeof(error)), error);
+    TEST_ASSERT(encoded_le_size == encoded_size, "A4 le/be size mismatch.");
+    test_expect_bytes(encoded_le, encoded, encoded_size, "A4 endianness-neutral bytes");
+    free(encoded_le);
+    encoded_le = NULL;
+    free(encoded);
+    encoded = NULL;
+  }
+
+  /* a2：5x1，行 stride 2；量化 (a*3+127)/255。 */
+  {
+    const unsigned char alphas[5] = { 0, 85, 170, 255, 255 };
+    const unsigned char expected[2] = { 0x1B, 0xC0 };
+
+    memset(pixels, 0xBE, sizeof(pixels));
+    for (index = 0; index < 5; ++index) {
+      pixels[index * 4 + 3] = alphas[index];
+    }
+    image.width = 5;
+    image.height = 1;
+    image.pixels = pixels;
+
+    TEST_ASSERT(img2bin_encode_raw_image(IMG2BIN_FMT_A2, IMG2BIN_ENDIAN_BIG, background, &image, &encoded, &encoded_size, error, sizeof(error)), error);
+    TEST_ASSERT(encoded_size == 2, "A2 payload size mismatch.");
+    test_expect_bytes(encoded, expected, 2, "A2 packed bytes");
+    free(encoded);
+    encoded = NULL;
+  }
+
+  /* a1：9x2 奇数宽度跨字节，行 stride 2；阈值 (a*1+127)/255 → 127→0、128→1。 */
+  {
+    const unsigned char alphas[18] = {
+      255, 0, 255, 0, 255, 0, 255, 0, 255,
+      127, 128, 0, 0, 0, 0, 0, 0, 127
+    };
+    const unsigned char expected[4] = { 0xAA, 0x80, 0x40, 0x00 };
+
+    memset(pixels, 0xEF, sizeof(pixels));
+    image.width = 9;
+    image.height = 2;
+    image.pixels = pixels;
+    for (index = 0; index < 18; ++index) {
+      pixels[index * 4 + 3] = alphas[index];
+    }
+
+    TEST_ASSERT(img2bin_format_row_stride(IMG2BIN_FMT_A1, 9u) == 2u, "A1 row stride mismatch.");
+    TEST_ASSERT(img2bin_encode_raw_image(IMG2BIN_FMT_A1, IMG2BIN_ENDIAN_BIG, background, &image, &encoded, &encoded_size, error, sizeof(error)), error);
+    TEST_ASSERT(encoded_size == 4, "A1 payload size mismatch.");
+    test_expect_bytes(encoded, expected, 4, "A1 threshold and padding bytes");
+    free(encoded);
+    encoded = NULL;
+  }
 }
 
 static void test_imprle_segments_for_group_sizes(void)
@@ -1039,6 +1144,12 @@ static void test_info_json(void)
   TEST_ASSERT(strstr(json, "\"display_name\": {\n        \"zh_cn\": \"ARGB8888\"") != NULL, "Info JSON missing ARGB8888 display name.");
   TEST_ASSERT(strstr(json, "\"uses_background_color\": true") != NULL, "Info JSON missing background-color capability.");
   TEST_ASSERT(strstr(json, "\"endianness_affects_output\": false") != NULL, "Info JSON missing one-byte endianness metadata.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a8\"") != NULL, "Raw info JSON missing a8 alpha mask format.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a4\"") != NULL, "Raw info JSON missing a4 alpha mask format.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a2\"") != NULL, "Raw info JSON missing a2 alpha mask format.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a1\"") != NULL, "Raw info JSON missing a1 alpha mask format.");
+  TEST_ASSERT(strstr(json, "\"bits_per_pixel\": 4") != NULL, "Raw info JSON missing sub-byte bits-per-pixel metadata.");
+  TEST_ASSERT(strstr(json, "\"is_alpha_only\": true") != NULL, "Raw info JSON missing alpha-only capability.");
 }
 
 static void test_imprle_info_json(void)
@@ -1054,6 +1165,8 @@ static void test_imprle_info_json(void)
   TEST_ASSERT(strstr(json, "\"zh_cn\": \"改进RLE取模\"") != NULL, "Improved-RLE info JSON missing Chinese display name.");
   TEST_ASSERT(strstr(json, "\"en\": \"Improved RLE Image Converter\"") != NULL, "Improved-RLE info JSON missing English display name.");
   TEST_ASSERT(strstr(json, "\"filename_pattern\": \"{source_stem}_{format_name}_imprle_{endianness_token}_{width}x{height}.bin\"") != NULL, "Improved-RLE info JSON missing filename pattern.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a8\"") == NULL, "Improved-RLE info JSON must not list alpha mask formats.");
+  TEST_ASSERT(strstr(json, "\"is_alpha_only\": true") == NULL, "Improved-RLE info JSON must not flag alpha-only formats.");
 }
 
 static void test_rle_info_json(void)
@@ -1069,6 +1182,7 @@ static void test_rle_info_json(void)
   TEST_ASSERT(strstr(json, "\"zh_cn\": \"原始RLE取模\"") != NULL, "Original-RLE info JSON missing Chinese display name.");
   TEST_ASSERT(strstr(json, "\"en\": \"Original RLE Image Converter\"") != NULL, "Original-RLE info JSON missing English display name.");
   TEST_ASSERT(strstr(json, "\"filename_pattern\": \"{source_stem}_{format_name}_rle_{endianness_token}_{width}x{height}.bin\"") != NULL, "Original-RLE info JSON missing filename pattern.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a8\"") == NULL, "Original-RLE info JSON must not list alpha mask formats.");
 }
 
 static void test_qoi_info_json(void)
@@ -1084,6 +1198,7 @@ static void test_qoi_info_json(void)
   TEST_ASSERT(strstr(json, "\"zh_cn\": \"原始QOI取模\"") != NULL, "Original-QOI info JSON missing Chinese display name.");
   TEST_ASSERT(strstr(json, "\"en\": \"Original QOI Image Converter\"") != NULL, "Original-QOI info JSON missing English display name.");
   TEST_ASSERT(strstr(json, "\"filename_pattern\": \"{source_stem}_{format_name}_qoi_{endianness_token}_{width}x{height}.bin\"") != NULL, "Original-QOI info JSON missing filename pattern.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a8\"") == NULL, "Original-QOI info JSON must not list alpha mask formats.");
 }
 
 static void test_qoif_info_json(void)
@@ -1099,6 +1214,7 @@ static void test_qoif_info_json(void)
   TEST_ASSERT(strstr(json, "\"zh_cn\": \"原始QOI(无字典)取模\"") != NULL, "Original-QOIF info JSON missing Chinese display name.");
   TEST_ASSERT(strstr(json, "\"en\": \"Original QOI Without Index Image Converter\"") != NULL, "Original-QOIF info JSON missing English display name.");
   TEST_ASSERT(strstr(json, "\"filename_pattern\": \"{source_stem}_{format_name}_qoif_{endianness_token}_{width}x{height}.bin\"") != NULL, "Original-QOIF info JSON missing filename pattern.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a8\"") == NULL, "Original-QOIF info JSON must not list alpha mask formats.");
 }
 
 static void test_indexqoi_info_json(void)
@@ -1117,6 +1233,7 @@ static void test_indexqoi_info_json(void)
   TEST_ASSERT(strstr(json, "\"supports_index_interval\": true") != NULL, "IndexQOI info JSON missing index-interval capability.");
   TEST_ASSERT(strstr(json, "\"index_interval\": \"image_width\"") != NULL, "IndexQOI info JSON missing default index interval.");
   TEST_ASSERT(strstr(json, "\"flag\": \"--index-interval\"") != NULL, "IndexQOI info JSON missing invocation flag for index interval.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a8\"") == NULL, "IndexQOI info JSON must not list alpha mask formats.");
 }
 
 static void test_cli_default_mode_and_unicode_paths(void)
@@ -1265,6 +1382,74 @@ static void test_error_json_for_invalid_cli(void)
   TEST_ASSERT(strstr(stderr_text, "\"zh_cn\":\"命令行参数无效。\"") != NULL, "CLI error JSON missing Chinese message.");
   TEST_ASSERT(strstr(stderr_text, "\"en\":\"Invalid command-line arguments.\"") != NULL, "CLI error JSON missing English message.");
   free(stderr_text);
+}
+
+/* Alpha 蒙版的工具门禁：非 raw 工具显式点名 A 格式报 CLI 错误、
+   --formats all 静默滤除；raw 工具产出的 a4 文件含 0x0C 格式码头。 */
+static void test_alpha_mask_cli_tool_gate(void)
+{
+  char stage[IMG2BIN_PATH_CAPACITY];
+  char image_path[IMG2BIN_PATH_CAPACITY];
+  char output_dir[IMG2BIN_PATH_CAPACITY];
+  char stderr_path[IMG2BIN_PATH_CAPACITY];
+  char rle_exe[IMG2BIN_PATH_CAPACITY];
+  char raw_exe[IMG2BIN_PATH_CAPACITY];
+  char expected_a4[IMG2BIN_PATH_CAPACITY];
+  char rejected_a8[IMG2BIN_PATH_CAPACITY];
+  char rgb565_rle[IMG2BIN_PATH_CAPACITY];
+  char error[256];
+  char *stderr_text = NULL;
+  unsigned char *actual = NULL;
+  size_t actual_size = 0;
+  int saved_fd = -1;
+  int exit_code = 0;
+  unsigned char pixel[4] = { 0x12, 0x34, 0x56, 0xFF };
+  const unsigned char expected_a4_file[7] = { 0x00, 0x0C, 0x00, 0x01, 0x00, 0x01, 0xF0 };
+  const char *argv_rle_a8[] = { "img2bin_rle", NULL, "--output", NULL, "--format", "a8" };
+  const char *argv_rle_all[] = { "img2bin_rle", NULL, "--output", NULL, "--formats", "all" };
+  const char *argv_raw_a4[] = { "img2bin_raw", NULL, "--output", NULL, "--format", "a4" };
+
+  test_make_stage_directory("alpha_gate", stage, sizeof(stage));
+  TEST_ASSERT(img2bin_path_join(stage, "mask.png", image_path, sizeof(image_path)), "Could not compose alpha gate fixture path.");
+  TEST_ASSERT(img2bin_path_join(stage, "out", output_dir, sizeof(output_dir)), "Could not compose alpha gate output directory.");
+  TEST_ASSERT(img2bin_path_join(stage, "stderr-alpha.jsonl", stderr_path, sizeof(stderr_path)), "Could not compose alpha gate stderr path.");
+  TEST_ASSERT(img2bin_path_join(stage, "img2bin_rle.exe", rle_exe, sizeof(rle_exe)), "Could not compose rle executable override path.");
+  TEST_ASSERT(img2bin_path_join(stage, "img2bin_raw.exe", raw_exe, sizeof(raw_exe)), "Could not compose raw executable override path.");
+  TEST_ASSERT(img2bin_make_dirs(output_dir, error, sizeof(error)), error);
+  test_write_rgba_fixture(image_path, 1, 1, pixel);
+
+  argv_rle_a8[1] = image_path;
+  argv_rle_a8[3] = output_dir;
+  TEST_ASSERT(test_redirect_stderr_begin(stderr_path, &saved_fd), "Could not redirect stderr for alpha gate test.");
+  exit_code = img2bin_rle_run_with_executable_path(6, argv_rle_a8, rle_exe);
+  TEST_ASSERT(test_redirect_stderr_end(saved_fd), "Could not restore stderr for alpha gate test.");
+  TEST_ASSERT(exit_code == 1, "Explicit a8 on a non-raw tool must return exit code 1.");
+
+  stderr_text = test_read_text_file(stderr_path);
+  TEST_ASSERT(stderr_text != NULL, "Could not read alpha gate error output.");
+  TEST_ASSERT(test_count_nonempty_lines(stderr_text) == 1, "Alpha gate error output should contain exactly one JSON line.");
+  TEST_ASSERT(strstr(stderr_text, "\"code\":\"cli_parse_failed\"") != NULL, "Alpha gate error JSON missing code.");
+  TEST_ASSERT(strstr(stderr_text, "\"stage\":\"cli\"") != NULL, "Alpha gate error JSON missing stage.");
+  TEST_ASSERT(strstr(stderr_text, "a8") != NULL, "Alpha gate error JSON missing offending format name.");
+  free(stderr_text);
+  stderr_text = NULL;
+
+  argv_rle_all[1] = image_path;
+  argv_rle_all[3] = output_dir;
+  TEST_ASSERT(img2bin_rle_run_with_executable_path(6, argv_rle_all, rle_exe) == 0, "--formats all on a non-raw tool must silently skip alpha masks.");
+  TEST_ASSERT(img2bin_path_join(output_dir, "mask_rgb565_rle_be_1x1.bin", rgb565_rle, sizeof(rgb565_rle)), "Could not compose rgb565 rle output path.");
+  TEST_ASSERT(img2bin_path_join(output_dir, "mask_a8_rle_be_1x1.bin", rejected_a8, sizeof(rejected_a8)), "Could not compose a8 rle output path.");
+  TEST_ASSERT(img2bin_is_regular_file(rgb565_rle), "--formats all should still emit color formats on rle.");
+  TEST_ASSERT(!img2bin_is_regular_file(rejected_a8), "--formats all must not emit alpha masks on rle.");
+
+  argv_raw_a4[1] = image_path;
+  argv_raw_a4[3] = output_dir;
+  TEST_ASSERT(img2bin_raw_run_with_executable_path(6, argv_raw_a4, raw_exe) == 0, "raw --format a4 run failed.");
+  TEST_ASSERT(img2bin_path_join(output_dir, "mask_a4_raw_be_1x1.bin", expected_a4, sizeof(expected_a4)), "Could not compose a4 raw output path.");
+  TEST_ASSERT(img2bin_read_file(expected_a4, &actual, &actual_size, error, sizeof(error)), error);
+  TEST_ASSERT(actual_size == sizeof(expected_a4_file), "a4 output file size mismatch.");
+  test_expect_bytes(actual, expected_a4_file, sizeof(expected_a4_file), "a4 output file with resource header");
+  free(actual);
 }
 
 static void test_positional_single_file_and_input_conflict(void)
@@ -1537,6 +1722,10 @@ static void test_resource_header_golden(void)
   TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_ARGB8565) == 0x8, "ARGB8565 header nibble mismatch.");
   TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_ARGB2222) == 0x9, "ARGB2222 header nibble mismatch.");
   TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_RAGB5155) == 0xA, "RAGB5155 header nibble mismatch.");
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_A8) == 0xB, "A8 header nibble mismatch.");
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_A4) == 0xC, "A4 header nibble mismatch.");
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_A2) == 0xD, "A2 header nibble mismatch.");
+  TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_A1) == 0xE, "A1 header nibble mismatch.");
 
   TEST_ASSERT(img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_RAW, IMG2BIN_FMT_RGB565, 2u, 3u, header), "Could not build the raw/rgb565 header.");
   test_expect_bytes(header, expected_raw_rgb565, IMG2BIN_RESOURCE_HEADER_SIZE, "raw rgb565 resource header");
@@ -1901,391 +2090,6 @@ static void test_indexqoi_cli_and_manifest(void)
   free(manifest_text);
 }
 
-static void test_pack_json_parser(void)
-{
-  char error[256];
-  img2bin_pack_json_value_t *root = NULL;
-  const img2bin_pack_json_value_t *list = NULL;
-
-  root = img2bin_pack_json_parse(
-    "{\"a\": 1, \"b\": [true, false, null, \"x\\ny\", 2.5], \"c\": {\"d\": \"中文\", \"e\": \"\\u4e2d\"}, \"f\": -3}",
-    error,
-    sizeof(error));
-  TEST_ASSERT(root != NULL, "Pack JSON parser rejected a valid document.");
-  TEST_ASSERT(img2bin_pack_json_number_at(root, "a", 0.0) == 1.0, "Pack JSON number lookup failed.");
-  TEST_ASSERT(img2bin_pack_json_number_at(root, "f", 0.0) == -3.0, "Pack JSON negative number lookup failed.");
-  TEST_ASSERT(strcmp(img2bin_pack_json_string_at(root, "c.d", ""), "中文") == 0, "Pack JSON UTF-8 string lookup failed.");
-  TEST_ASSERT(strcmp(img2bin_pack_json_string_at(root, "c.e", ""), "中") == 0, "Pack JSON unicode escape decoding failed.");
-  list = img2bin_pack_json_path_get(root, "b");
-  TEST_ASSERT(list != NULL && list->type == IMG2BIN_PACK_JSON_ARRAY && list->member_count == 5, "Pack JSON array parsing failed.");
-  TEST_ASSERT(list->member_values[0]->type == IMG2BIN_PACK_JSON_BOOL && list->member_values[0]->bool_value == 1, "Pack JSON true parsing failed.");
-  TEST_ASSERT(list->member_values[2]->type == IMG2BIN_PACK_JSON_NULL, "Pack JSON null parsing failed.");
-  TEST_ASSERT(strcmp(list->member_values[3]->string_value, "x\ny") == 0, "Pack JSON escape parsing failed.");
-  img2bin_pack_json_free(root);
-
-  TEST_ASSERT(img2bin_pack_json_parse("{} x", error, sizeof(error)) == NULL, "Pack JSON parser accepted trailing characters.");
-  TEST_ASSERT(img2bin_pack_json_parse("{bad}", error, sizeof(error)) == NULL, "Pack JSON parser accepted an invalid document.");
-}
-
-static void test_pack_bin_name_parsing(void)
-{
-  img2bin_pack_bin_info_t info;
-
-  TEST_ASSERT(img2bin_pack_parse_bin_name("screen_rgb565_raw_be_36x45.bin", &info), "Pack failed to parse a standard bin name.");
-  TEST_ASSERT(strcmp(info.stem, "screen") == 0, "Pack parsed the wrong stem.");
-  TEST_ASSERT(strcmp(info.format_name, "rgb565") == 0, "Pack parsed the wrong format.");
-  TEST_ASSERT(strcmp(info.algorithm, "raw") == 0, "Pack parsed the wrong algorithm.");
-  TEST_ASSERT(strcmp(info.endianness, "be") == 0, "Pack parsed the wrong endianness.");
-  TEST_ASSERT(info.width == 36 && info.height == 45, "Pack parsed the wrong dimensions.");
-
-  TEST_ASSERT(img2bin_pack_parse_bin_name("my_icon_argb8888_qoi_le_10x20.bin", &info), "Pack failed to parse an underscored stem.");
-  TEST_ASSERT(strcmp(info.stem, "my_icon") == 0, "Pack mis-split an underscored stem.");
-  TEST_ASSERT(strcmp(info.algorithm, "qoi") == 0 && strcmp(info.endianness, "le") == 0, "Pack mis-parsed tokens of an underscored name.");
-
-  TEST_ASSERT(img2bin_pack_parse_bin_name("C:\\somewhere\\deep\\screen_rgb565_imprle_be_1x1.bin", &info), "Pack failed to parse a full path.");
-  TEST_ASSERT(strcmp(info.algorithm, "imprle") == 0, "Pack mis-parsed the algorithm from a full path.");
-
-  TEST_ASSERT(!img2bin_pack_parse_bin_name("screen_rgb565_raw_be_36x.bin", &info), "Pack accepted malformed dimensions.");
-  TEST_ASSERT(!img2bin_pack_parse_bin_name("screen_rgb565_raw_xx_36x45.bin", &info), "Pack accepted a bad endianness token.");
-  TEST_ASSERT(!img2bin_pack_parse_bin_name("screen_nosuchfmt_raw_be_36x45.bin", &info), "Pack accepted an unknown pixel format.");
-  TEST_ASSERT(!img2bin_pack_parse_bin_name("rgb565_raw_be_1x1.bin", &info), "Pack accepted an empty stem.");
-  TEST_ASSERT(!img2bin_pack_parse_bin_name("screen_rgb565_raw_be_36x45.txt", &info), "Pack accepted a non-bin extension.");
-}
-
-static void test_pack_symbol_sanitize(void)
-{
-  char symbol[64];
-
-  TEST_ASSERT(img2bin_pack_sanitize_symbol("a (1)", symbol, sizeof(symbol)), "Pack failed to sanitize a symbol.");
-  TEST_ASSERT(strcmp(symbol, "a__1_") == 0, "Pack sanitized symbol mismatch.");
-
-  TEST_ASSERT(img2bin_pack_sanitize_symbol("9lives", symbol, sizeof(symbol)), "Pack failed to sanitize a leading digit.");
-  TEST_ASSERT(strcmp(symbol, "img_9lives") == 0, "Pack leading-digit symbol mismatch.");
-
-  TEST_ASSERT(img2bin_pack_sanitize_symbol("中文", symbol, sizeof(symbol)), "Pack failed to sanitize non-ASCII input.");
-  TEST_ASSERT(strcmp(symbol, "______") == 0, "Pack non-ASCII symbol mismatch.");
-
-  TEST_ASSERT(img2bin_pack_sanitize_symbol("", symbol, sizeof(symbol)), "Pack failed to sanitize an empty name.");
-  TEST_ASSERT(strcmp(symbol, "img") == 0, "Pack empty-name symbol mismatch.");
-}
-
-static void test_pack_codegen_combined_golden(void)
-{
-  char stage[IMG2BIN_PATH_CAPACITY];
-  char bin_path[IMG2BIN_PATH_CAPACITY];
-  char generated_path[IMG2BIN_PATH_CAPACITY];
-  char expected[4096];
-  char error[512];
-  img2bin_string_list_t bin_paths;
-  img2bin_string_list_t generated;
-  char *text = NULL;
-  const unsigned char alpha_bytes[2] = { 0x12, 0x34 };
-  unsigned char beta_bytes[13];
-  size_t index = 0;
-
-  memset(&bin_paths, 0, sizeof(bin_paths));
-  memset(&generated, 0, sizeof(generated));
-  for (index = 0; index < sizeof(beta_bytes); ++index) {
-    beta_bytes[index] = (unsigned char)index;
-  }
-
-  test_make_stage_directory("pack_codegen", stage, sizeof(stage));
-
-  TEST_ASSERT(img2bin_path_join(stage, "alpha_rgb565_raw_be_1x1.bin", bin_path, sizeof(bin_path)), "Could not compose alpha bin path.");
-  TEST_ASSERT(img2bin_write_file(bin_path, alpha_bytes, sizeof(alpha_bytes), error, sizeof(error)), error);
-  TEST_ASSERT(img2bin_string_list_append(&bin_paths, bin_path), "Could not record alpha bin path.");
-
-  TEST_ASSERT(img2bin_path_join(stage, "beta_argb8888_qoi_le_2x1.bin", bin_path, sizeof(bin_path)), "Could not compose beta bin path.");
-  TEST_ASSERT(img2bin_write_file(bin_path, beta_bytes, sizeof(beta_bytes), error, sizeof(error)), error);
-  TEST_ASSERT(img2bin_string_list_append(&bin_paths, bin_path), "Could not record beta bin path.");
-
-  TEST_ASSERT(img2bin_pack_generate_sources(&bin_paths, stage, NULL, &generated, error, sizeof(error)), error);
-  TEST_ASSERT(generated.count == 2, "Combined codegen should produce one header and one source.");
-
-  snprintf(
-    expected,
-    sizeof(expected),
-    "/* Generated by img2bin_pack %s. Do not edit. */\n"
-    "#ifndef IMG2BIN_PACK_IMG_RESOURCES_H\n"
-    "#define IMG2BIN_PACK_IMG_RESOURCES_H\n"
-    "\n"
-    "/* alpha_rgb565_raw_be_1x1.bin */\n"
-    "#define ALPHA_RGB565_RAW_BE_1X1_WIDTH 1u\n"
-    "#define ALPHA_RGB565_RAW_BE_1X1_HEIGHT 1u\n"
-    "#define ALPHA_RGB565_RAW_BE_1X1_SIZE 2u\n"
-    "extern const unsigned char alpha_rgb565_raw_be_1x1[2];\n"
-    "\n"
-    "/* beta_argb8888_qoi_le_2x1.bin */\n"
-    "#define BETA_ARGB8888_QOI_LE_2X1_WIDTH 2u\n"
-    "#define BETA_ARGB8888_QOI_LE_2X1_HEIGHT 1u\n"
-    "#define BETA_ARGB8888_QOI_LE_2X1_SIZE 13u\n"
-    "extern const unsigned char beta_argb8888_qoi_le_2x1[13];\n"
-    "\n"
-    "#endif\n",
-    IMG2BIN_VERSION_TEXT);
-
-  TEST_ASSERT(img2bin_path_join(stage, "img_resources.h", generated_path, sizeof(generated_path)), "Could not compose generated header path.");
-  text = test_read_text_file(generated_path);
-  TEST_ASSERT(text != NULL, "Combined header was not generated.");
-  TEST_ASSERT(strcmp(text, expected) == 0, "Combined header content mismatch.");
-  free(text);
-
-  snprintf(
-    expected,
-    sizeof(expected),
-    "/* Generated by img2bin_pack %s. Do not edit. */\n"
-    "#include \"img_resources.h\"\n"
-    "\n"
-    "/* alpha_rgb565_raw_be_1x1.bin: format=rgb565 algorithm=raw endianness=be width=1 height=1 bytes=2 */\n"
-    "const unsigned char alpha_rgb565_raw_be_1x1[2] = {\n"
-    "  0x12, 0x34\n"
-    "};\n"
-    "\n"
-    "/* beta_argb8888_qoi_le_2x1.bin: format=argb8888 algorithm=qoi endianness=le width=2 height=1 bytes=13 */\n"
-    "const unsigned char beta_argb8888_qoi_le_2x1[13] = {\n"
-    "  0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,\n"
-    "  0x0C\n"
-    "};\n"
-    "\n",
-    IMG2BIN_VERSION_TEXT);
-
-  TEST_ASSERT(img2bin_path_join(stage, "img_resources.c", generated_path, sizeof(generated_path)), "Could not compose generated source path.");
-  text = test_read_text_file(generated_path);
-  TEST_ASSERT(text != NULL, "Combined source was not generated.");
-  TEST_ASSERT(strcmp(text, expected) == 0, "Combined source content mismatch.");
-  free(text);
-
-  img2bin_string_list_free(&bin_paths);
-  img2bin_string_list_free(&generated);
-}
-
-static void test_pack_codegen_split_mode(void)
-{
-  char stage[IMG2BIN_PATH_CAPACITY];
-  char bin_path[IMG2BIN_PATH_CAPACITY];
-  char generated_path[IMG2BIN_PATH_CAPACITY];
-  char error[512];
-  img2bin_pack_codegen_options_t options;
-  img2bin_string_list_t bin_paths;
-  img2bin_string_list_t generated;
-  char *text = NULL;
-  const unsigned char bytes[3] = { 1, 2, 3 };
-
-  memset(&bin_paths, 0, sizeof(bin_paths));
-  memset(&generated, 0, sizeof(generated));
-
-  test_make_stage_directory("pack_codegen_split", stage, sizeof(stage));
-
-  TEST_ASSERT(img2bin_path_join(stage, "logo_rgb332_rle_be_4x4.bin", bin_path, sizeof(bin_path)), "Could not compose split bin path.");
-  TEST_ASSERT(img2bin_write_file(bin_path, bytes, sizeof(bytes), error, sizeof(error)), error);
-  TEST_ASSERT(img2bin_string_list_append(&bin_paths, bin_path), "Could not record split bin path.");
-
-  img2bin_pack_codegen_options_init(&options);
-  options.split = 1;
-
-  TEST_ASSERT(img2bin_pack_generate_sources(&bin_paths, stage, &options, &generated, error, sizeof(error)), error);
-  TEST_ASSERT(generated.count == 2, "Split codegen should produce one pair per bin.");
-
-  TEST_ASSERT(img2bin_path_join(stage, "logo_rgb332_rle_be_4x4.h", generated_path, sizeof(generated_path)), "Could not compose split header path.");
-  text = test_read_text_file(generated_path);
-  TEST_ASSERT(text != NULL, "Split header was not generated.");
-  TEST_ASSERT(strstr(text, "#ifndef IMG2BIN_PACK_LOGO_RGB332_RLE_BE_4X4_H") != NULL, "Split header guard mismatch.");
-  TEST_ASSERT(strstr(text, "extern const unsigned char logo_rgb332_rle_be_4x4[3];") != NULL, "Split header extern mismatch.");
-  free(text);
-
-  TEST_ASSERT(img2bin_path_join(stage, "logo_rgb332_rle_be_4x4.c", generated_path, sizeof(generated_path)), "Could not compose split source path.");
-  text = test_read_text_file(generated_path);
-  TEST_ASSERT(text != NULL, "Split source was not generated.");
-  TEST_ASSERT(strstr(text, "#include \"logo_rgb332_rle_be_4x4.h\"") != NULL, "Split source include mismatch.");
-  free(text);
-
-  img2bin_string_list_free(&bin_paths);
-  img2bin_string_list_free(&generated);
-}
-
-static void test_pack_config_parsing(void)
-{
-  char stage[IMG2BIN_PATH_CAPACITY];
-  char config_path[IMG2BIN_PATH_CAPACITY];
-  char error[512];
-  img2bin_pack_config_t *config = NULL;
-  const img2bin_pack_folder_rule_t *rule = NULL;
-  const char *config_json =
-    "{\n"
-    "  \"root\": \"..\",\n"
-    "  \"output\": \"out\",\n"
-    "  \"tools_dir\": \"tools\",\n"
-    "  \"defaults\": { \"formats\": [\"rgb565\", \"argb8888\"], \"endianness\": \"little\", \"bg_color\": \"FF00FF\", \"index_interval\": 256 },\n"
-    "  \"codegen\": { \"enabled\": true, \"mode\": \"split\", \"base_name\": \"assets\" },\n"
-    "  \"folders\": {\n"
-    "    \"input2qoi\": { \"formats\": \"all\", \"endianness\": \"big\" },\n"
-    "    \"my_icons\": { \"tool\": \"qoi\", \"bg_color\": \"112233\", \"output\": \"icons_out\", \"index_interval\": 64 }\n"
-    "  }\n"
-    "}\n";
-  const char *invalid_json = "{ \"defaults\": { \"endianness\": \"middle\" } }";
-
-  config = (img2bin_pack_config_t *)calloc(1, sizeof(*config));
-  TEST_ASSERT(config != NULL, "Could not allocate pack config.");
-
-  test_make_stage_directory("pack_config", stage, sizeof(stage));
-  TEST_ASSERT(img2bin_path_join(stage, "img2bin_pack.json", config_path, sizeof(config_path)), "Could not compose config path.");
-  TEST_ASSERT(img2bin_write_file(config_path, (const unsigned char *)config_json, strlen(config_json), error, sizeof(error)), error);
-
-  img2bin_pack_config_init(config);
-  TEST_ASSERT(img2bin_pack_config_load_file(config, config_path, error, sizeof(error)), error);
-  TEST_ASSERT(strcmp(config->root, "..") == 0, "Config root mismatch.");
-  TEST_ASSERT(strcmp(config->output, "out") == 0, "Config output mismatch.");
-  TEST_ASSERT(strcmp(config->tools_dir, "tools") == 0, "Config tools_dir mismatch.");
-  TEST_ASSERT(strcmp(config->formats, "rgb565,argb8888") == 0, "Config formats mismatch.");
-  TEST_ASSERT(config->endianness == IMG2BIN_ENDIAN_LITTLE, "Config endianness mismatch.");
-  TEST_ASSERT(strcmp(config->bg_color, "FF00FF") == 0, "Config bg_color mismatch.");
-  TEST_ASSERT(config->index_interval == 256, "Config index_interval mismatch.");
-  TEST_ASSERT(config->codegen_split == 1, "Config codegen mode mismatch.");
-  TEST_ASSERT(strcmp(config->codegen_base_name, "assets") == 0, "Config codegen base name mismatch.");
-  TEST_ASSERT(config->folder_rule_count == 2, "Config folder rule count mismatch.");
-
-  rule = img2bin_pack_config_find_rule(config, "INPUT2QOI");
-  TEST_ASSERT(rule != NULL, "Config folder lookup should be case-insensitive.");
-  TEST_ASSERT(strcmp(rule->formats, "all") == 0, "Config folder formats mismatch.");
-  TEST_ASSERT(rule->endianness == IMG2BIN_ENDIAN_BIG, "Config folder endianness mismatch.");
-
-  rule = img2bin_pack_config_find_rule(config, "my_icons");
-  TEST_ASSERT(rule != NULL, "Config custom folder rule is missing.");
-  TEST_ASSERT(strcmp(rule->tool, "qoi") == 0, "Config folder tool mismatch.");
-  TEST_ASSERT(strcmp(rule->bg_color, "112233") == 0, "Config folder bg_color mismatch.");
-  TEST_ASSERT(strcmp(rule->output, "icons_out") == 0, "Config folder output mismatch.");
-  TEST_ASSERT(rule->index_interval == 64, "Config folder index_interval mismatch.");
-
-  TEST_ASSERT(img2bin_write_file(config_path, (const unsigned char *)invalid_json, strlen(invalid_json), error, sizeof(error)), error);
-  img2bin_pack_config_init(config);
-  TEST_ASSERT(!img2bin_pack_config_load_file(config, config_path, error, sizeof(error)), "Config with invalid endianness must be rejected.");
-
-  free(config);
-}
-
-static void test_pack_info_json(void)
-{
-  char buffer[16384];
-  char error[256];
-  img2bin_pack_json_value_t *parsed = NULL;
-
-  TEST_ASSERT(img2bin_pack_get_info_json(buffer, sizeof(buffer)), "Pack info JSON did not fit the buffer.");
-  TEST_ASSERT(strstr(buffer, "\"id\": \"img2bin_pack\"") != NULL, "Pack info JSON is missing the tool id.");
-  TEST_ASSERT(strstr(buffer, "\"kind\": \"batch_orchestrator\"") != NULL, "Pack info JSON is missing the tool kind.");
-  TEST_ASSERT(strstr(buffer, "input2<algorithm_code>") != NULL, "Pack info JSON is missing the folder convention.");
-
-  parsed = img2bin_pack_json_parse(buffer, error, sizeof(error));
-  TEST_ASSERT(parsed != NULL, "Pack info JSON is not valid JSON.");
-  img2bin_pack_json_free(parsed);
-}
-
-static void test_pack_discovery_finds_tools(void)
-{
-  char binary_dir[IMG2BIN_PATH_CAPACITY];
-  char error[512];
-  img2bin_pack_tool_list_t *tools = NULL;
-  const img2bin_pack_tool_t *tool = NULL;
-
-  tools = (img2bin_pack_tool_list_t *)calloc(1, sizeof(*tools));
-  TEST_ASSERT(tools != NULL, "Could not allocate tool list.");
-
-  test_get_binary_directory(binary_dir, sizeof(binary_dir));
-  TEST_ASSERT(img2bin_pack_discover_tools(binary_dir, tools, error, sizeof(error)), error);
-  TEST_ASSERT(tools->count >= 6, "Pack should discover the six sibling tools.");
-
-  tool = img2bin_pack_find_tool(tools, "raw");
-  TEST_ASSERT(tool != NULL, "Pack did not discover img2bin_raw.");
-  TEST_ASSERT(strcmp(tool->tool_id, "img2bin_raw") == 0, "Pack discovered the wrong raw tool id.");
-  TEST_ASSERT(!tool->supports_index_interval, "raw must not support --index-interval.");
-
-  tool = img2bin_pack_find_tool(tools, "indexqoi");
-  TEST_ASSERT(tool != NULL, "Pack did not discover img2bin_indexqoi.");
-  TEST_ASSERT(tool->supports_index_interval, "indexqoi must support --index-interval.");
-
-  tool = img2bin_pack_find_tool(tools, "img2bin_qoif");
-  TEST_ASSERT(tool != NULL, "Pack did not find a tool by its id.");
-
-  free(tools);
-}
-
-static void test_pack_end_to_end(void)
-{
-  char stage[IMG2BIN_PATH_CAPACITY];
-  char binary_dir[IMG2BIN_PATH_CAPACITY];
-  char folder[IMG2BIN_PATH_CAPACITY];
-  char fixture[IMG2BIN_PATH_CAPACITY];
-  char output_dir[IMG2BIN_PATH_CAPACITY];
-  char expected_file[IMG2BIN_PATH_CAPACITY];
-  char pack_exe[IMG2BIN_PATH_CAPACITY];
-  char error[512];
-  char *text = NULL;
-  const char *argv[7];
-  int exit_code = -1;
-  const unsigned char pixels[16] = {
-    255, 0, 0, 255, 0, 255, 0, 255,
-    0, 0, 255, 255, 255, 255, 255, 255
-  };
-
-  test_make_stage_directory("pack_e2e", stage, sizeof(stage));
-  test_get_binary_directory(binary_dir, sizeof(binary_dir));
-
-  TEST_ASSERT(img2bin_path_join(stage, "input2raw", folder, sizeof(folder)), "Could not compose input2raw path.");
-  TEST_ASSERT(img2bin_make_dirs(folder, error, sizeof(error)), error);
-  TEST_ASSERT(img2bin_path_join(folder, "e2e.png", fixture, sizeof(fixture)), "Could not compose fixture path.");
-  test_write_rgba_fixture(fixture, 2, 2, pixels);
-
-  TEST_ASSERT(img2bin_path_join(stage, "input2indexqoi", folder, sizeof(folder)), "Could not compose input2indexqoi path.");
-  TEST_ASSERT(img2bin_make_dirs(folder, error, sizeof(error)), error);
-  TEST_ASSERT(img2bin_path_join(folder, "e2e.png", fixture, sizeof(fixture)), "Could not compose indexqoi fixture path.");
-  test_write_rgba_fixture(fixture, 2, 2, pixels);
-
-  TEST_ASSERT(img2bin_path_join(stage, "input2rle", folder, sizeof(folder)), "Could not compose input2rle path.");
-  TEST_ASSERT(img2bin_make_dirs(folder, error, sizeof(error)), error);
-
-#ifdef _WIN32
-  TEST_ASSERT(img2bin_path_join(binary_dir, "img2bin_pack.exe", pack_exe, sizeof(pack_exe)), "Could not compose pack exe path.");
-#else
-  TEST_ASSERT(img2bin_path_join(binary_dir, "img2bin_pack", pack_exe, sizeof(pack_exe)), "Could not compose pack exe path.");
-#endif
-
-  argv[0] = "img2bin_pack";
-  argv[1] = "--root";
-  argv[2] = stage;
-  argv[3] = "--tools";
-  argv[4] = binary_dir;
-  argv[5] = "--format";
-  argv[6] = "rgb565";
-
-  exit_code = img2bin_pack_run_with_executable_path(7, argv, pack_exe);
-  TEST_ASSERT(exit_code == 0, "Pack end-to-end run should succeed.");
-
-  TEST_ASSERT(img2bin_path_join(stage, "output", output_dir, sizeof(output_dir)), "Could not compose pack output path.");
-
-  TEST_ASSERT(img2bin_path_join(output_dir, "e2e_rgb565_raw_be_2x2.bin", expected_file, sizeof(expected_file)), "Could not compose raw bin path.");
-  TEST_ASSERT(img2bin_is_regular_file(expected_file), "Pack did not produce the raw bin output.");
-
-  TEST_ASSERT(img2bin_path_join(output_dir, "e2e_rgb565_indexqoi_be_2x2.bin", expected_file, sizeof(expected_file)), "Could not compose indexqoi bin path.");
-  TEST_ASSERT(img2bin_is_regular_file(expected_file), "Pack did not produce the indexqoi bin output.");
-
-  TEST_ASSERT(img2bin_path_join(output_dir, "img_resources.h", expected_file, sizeof(expected_file)), "Could not compose generated header path.");
-  text = test_read_text_file(expected_file);
-  TEST_ASSERT(text != NULL, "Pack did not generate the combined header.");
-  TEST_ASSERT(strstr(text, "extern const unsigned char e2e_rgb565_raw_be_2x2[") != NULL, "Generated header is missing the raw resource.");
-  TEST_ASSERT(strstr(text, "E2E_RGB565_INDEXQOI_BE_2X2_SIZE") != NULL, "Generated header is missing the indexqoi macros.");
-  free(text);
-
-  TEST_ASSERT(img2bin_path_join(output_dir, "img_resources.c", expected_file, sizeof(expected_file)), "Could not compose generated source path.");
-  TEST_ASSERT(img2bin_is_regular_file(expected_file), "Pack did not generate the combined source.");
-
-  TEST_ASSERT(img2bin_path_join(output_dir, "img2bin_pack-manifest.json", expected_file, sizeof(expected_file)), "Could not compose pack manifest path.");
-  text = test_read_text_file(expected_file);
-  TEST_ASSERT(text != NULL, "Pack did not write its manifest.");
-  TEST_ASSERT(strstr(text, "\"folder\": \"input2raw\"") != NULL, "Pack manifest is missing the raw folder entry.");
-  TEST_ASSERT(strstr(text, "\"status\": \"success\"") != NULL, "Pack manifest is missing a success entry.");
-  TEST_ASSERT(strstr(text, "\"status\": \"skipped_empty\"") != NULL, "Pack manifest is missing the skipped folder entry.");
-  free(text);
-}
-
 static void test_build_roundtrip_pixels(unsigned char *pixels, int width, int height)
 {
   int x = 0;
@@ -2381,6 +2185,61 @@ static void test_decoder_roundtrip_all(void)
 
       TEST_ASSERT(info != NULL, "Roundtrip format info is missing.");
       TEST_ASSERT(img2bin_decode_bytes_per_pixel(decode_format) == info->bytes_per_pixel, "Decoder bytes-per-pixel mismatch.");
+
+      /* Alpha 蒙版家族：raw 单算法回环 + 文件级自动分发；其余编码器/解码器必须拒绝。 */
+      if (info->is_alpha_only) {
+        size_t row_stride = img2bin_format_row_stride(format, ROUNDTRIP_W);
+        size_t expected_size = img2bin_format_payload_size(format, ROUNDTRIP_W, ROUNDTRIP_H);
+        unsigned char headered[2048];
+        unsigned char universal[IMG2BIN_RESOURCE_HEADER_SIZE];
+        img2bin_decode_header_t file_header;
+        size_t headered_size = 0;
+
+        TEST_ASSERT(img2bin_decode_bits_per_pixel(decode_format) == info->bits_per_pixel, "Decoder bits-per-pixel mismatch.");
+        TEST_ASSERT(img2bin_decode_row_stride(decode_format, ROUNDTRIP_W) == row_stride, "Decoder row stride mismatch.");
+        TEST_ASSERT(img2bin_encode_raw_image(format, endianness, background, &image, &raw_buffer, &raw_size, error, sizeof(error)), error);
+        TEST_ASSERT(raw_size == expected_size, "Alpha raw payload size mismatch.");
+
+        status = img2bin_decode_raw_alpha(raw_buffer, raw_size, decode_format, ROUNDTRIP_W, ROUNDTRIP_H, decoded, sizeof(decoded), &decoded_size);
+        test_decoder_expect_roundtrip("raw-alpha", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
+
+        status = img2bin_decode_raw_alpha(raw_buffer, raw_size - 1u, decode_format, ROUNDTRIP_W, ROUNDTRIP_H, decoded, sizeof(decoded), &decoded_size);
+        TEST_ASSERT(status == IMG2BIN_DECODE_ERR_TRUNCATED, "Truncated alpha payload must be rejected.");
+
+        status = img2bin_decode_raw(raw_buffer, raw_size, decode_format, pixel_count, decoded, sizeof(decoded), &decoded_size);
+        TEST_ASSERT(status == IMG2BIN_DECODE_ERR_ARGUMENTS, "Pixel-count decode_raw must reject alpha mask formats.");
+        status = img2bin_decode_rle(raw_buffer, raw_size, decode_format, pixel_count, decoded, sizeof(decoded), &decoded_size);
+        TEST_ASSERT(status == IMG2BIN_DECODE_ERR_ARGUMENTS, "decode_rle must reject alpha mask formats.");
+        status = img2bin_decode_qoi(raw_buffer, raw_size, decode_format, decode_endianness, pixel_count, decoded, sizeof(decoded), &decoded_size);
+        TEST_ASSERT(status == IMG2BIN_DECODE_ERR_ARGUMENTS, "decode_qoi must reject alpha mask formats.");
+
+        TEST_ASSERT(!img2bin_encode_rle_image(format, endianness, background, &image, &encoded, &encoded_size, error, sizeof(error)), "RLE encoder must reject alpha mask formats.");
+        TEST_ASSERT(!img2bin_encode_imprle_image(format, endianness, background, &image, &encoded, &encoded_size, error, sizeof(error)), "Improved-RLE encoder must reject alpha mask formats.");
+        TEST_ASSERT(!img2bin_encode_qoi_image(format, endianness, background, &image, &encoded, &encoded_size, error, sizeof(error)), "QOI encoder must reject alpha mask formats.");
+        TEST_ASSERT(!img2bin_encode_qoif_image(format, endianness, background, &image, &encoded, &encoded_size, error, sizeof(error)), "QOIF encoder must reject alpha mask formats.");
+        TEST_ASSERT(!img2bin_encode_indexqoi_image(format, endianness, background, &image, 0u, &encoded, &encoded_size, error, sizeof(error)), "IndexQOI encoder must reject alpha mask formats.");
+
+        TEST_ASSERT(raw_size + IMG2BIN_RESOURCE_HEADER_SIZE <= sizeof(headered), "Headered alpha fixture is unexpectedly large.");
+        TEST_ASSERT(img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_RAW, format, ROUNDTRIP_W, ROUNDTRIP_H, universal), "Could not build the alpha raw resource header.");
+        memcpy(headered, universal, IMG2BIN_RESOURCE_HEADER_SIZE);
+        memcpy(headered + IMG2BIN_RESOURCE_HEADER_SIZE, raw_buffer, raw_size);
+        headered_size = raw_size + IMG2BIN_RESOURCE_HEADER_SIZE;
+
+        status = img2bin_decode_image(headered, headered_size, decode_endianness, &file_header, decoded, sizeof(decoded), &decoded_size);
+        test_decoder_expect_roundtrip("file-level raw-alpha", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
+        TEST_ASSERT(file_header.format == decode_format, "decode_image reported the wrong alpha mask format.");
+        TEST_ASSERT(file_header.width == ROUNDTRIP_W && file_header.height == ROUNDTRIP_H, "decode_image reported wrong alpha mask dimensions.");
+
+        /* 头里 Alpha 蒙版 + 非 raw 算法 = 工具不可能产出的组合，按损坏流拒绝。 */
+        headered[1] = (unsigned char)((IMG2BIN_HEADER_ALGO_RLE << 4) | (headered[1] & 0x0Fu));
+        status = img2bin_decode_image(headered, headered_size, decode_endianness, NULL, decoded, sizeof(decoded), &decoded_size);
+        TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "Alpha mask with a non-raw algorithm nibble must be rejected as corrupt.");
+
+        free(raw_buffer);
+        raw_buffer = NULL;
+        continue;
+      }
+
       TEST_ASSERT(img2bin_encode_raw_image(format, endianness, background, &image, &raw_buffer, &raw_size, error, sizeof(error)), error);
 
       status = img2bin_decode_raw(raw_buffer, raw_size, decode_format, pixel_count, decoded, sizeof(decoded), &decoded_size);
@@ -2556,75 +2415,6 @@ static void test_decoder_rejects_damage(void)
   }
 }
 
-static void test_pack_folder_selection_and_emit(void)
-{
-  char stage[IMG2BIN_PATH_CAPACITY];
-  char binary_dir[IMG2BIN_PATH_CAPACITY];
-  char folder[IMG2BIN_PATH_CAPACITY];
-  char fixture[IMG2BIN_PATH_CAPACITY];
-  char output_dir[IMG2BIN_PATH_CAPACITY];
-  char expected_file[IMG2BIN_PATH_CAPACITY];
-  char pack_exe[IMG2BIN_PATH_CAPACITY];
-  char error[512];
-  char *text = NULL;
-  const char *argv[11];
-  int exit_code = -1;
-  const unsigned char pixels[4] = { 128, 64, 32, 255 };
-
-  test_make_stage_directory("pack_select", stage, sizeof(stage));
-  test_get_binary_directory(binary_dir, sizeof(binary_dir));
-
-  TEST_ASSERT(img2bin_path_join(stage, "input2raw", folder, sizeof(folder)), "Could not compose selection input2raw path.");
-  TEST_ASSERT(img2bin_make_dirs(folder, error, sizeof(error)), error);
-  TEST_ASSERT(img2bin_path_join(folder, "pick.png", fixture, sizeof(fixture)), "Could not compose selection fixture path.");
-  test_write_rgba_fixture(fixture, 1, 1, pixels);
-
-  TEST_ASSERT(img2bin_path_join(stage, "input2qoi", folder, sizeof(folder)), "Could not compose selection input2qoi path.");
-  TEST_ASSERT(img2bin_make_dirs(folder, error, sizeof(error)), error);
-  TEST_ASSERT(img2bin_path_join(folder, "pick.png", fixture, sizeof(fixture)), "Could not compose selection qoi fixture path.");
-  test_write_rgba_fixture(fixture, 1, 1, pixels);
-
-#ifdef _WIN32
-  TEST_ASSERT(img2bin_path_join(binary_dir, "img2bin_pack.exe", pack_exe, sizeof(pack_exe)), "Could not compose selection pack exe path.");
-#else
-  TEST_ASSERT(img2bin_path_join(binary_dir, "img2bin_pack", pack_exe, sizeof(pack_exe)), "Could not compose selection pack exe path.");
-#endif
-
-  argv[0] = "img2bin_pack";
-  argv[1] = "--root";
-  argv[2] = stage;
-  argv[3] = "--tools";
-  argv[4] = binary_dir;
-  argv[5] = "--folders";
-  argv[6] = "input2raw";
-  argv[7] = "--emit";
-  argv[8] = "bin";
-
-  exit_code = img2bin_pack_run_with_executable_path(9, argv, pack_exe);
-  TEST_ASSERT(exit_code == 0, "Pack selective run should succeed.");
-
-  TEST_ASSERT(img2bin_path_join(stage, "output", output_dir, sizeof(output_dir)), "Could not compose selection output path.");
-  TEST_ASSERT(img2bin_path_join(output_dir, "pick_rgb565_raw_be_1x1.bin", expected_file, sizeof(expected_file)), "Could not compose selected bin path.");
-  TEST_ASSERT(img2bin_is_regular_file(expected_file), "Selected folder was not processed.");
-  TEST_ASSERT(img2bin_path_join(output_dir, "pick_rgb565_qoi_be_1x1.bin", expected_file, sizeof(expected_file)), "Could not compose unselected bin path.");
-  TEST_ASSERT(!img2bin_is_regular_file(expected_file), "Unselected folder must not be processed.");
-  TEST_ASSERT(img2bin_path_join(output_dir, "img_resources.h", expected_file, sizeof(expected_file)), "Could not compose emit header path.");
-  TEST_ASSERT(!img2bin_is_regular_file(expected_file), "--emit bin must not generate .c/.h.");
-
-  TEST_ASSERT(img2bin_path_join(output_dir, "img2bin_pack-manifest.json", expected_file, sizeof(expected_file)), "Could not compose selection manifest path.");
-  text = test_read_text_file(expected_file);
-  TEST_ASSERT(text != NULL, "Selective run did not write a manifest.");
-  TEST_ASSERT(strstr(text, "\"folder\": \"input2raw\"") != NULL, "Selection manifest is missing the chosen folder.");
-  TEST_ASSERT(strstr(text, "\"folder\": \"input2qoi\"") == NULL, "Selection manifest must not contain unselected folders.");
-  TEST_ASSERT(strstr(text, "\"enabled\": false") != NULL, "Selection manifest should record codegen disabled.");
-  free(text);
-
-  argv[5] = "--folders";
-  argv[6] = "input2nothere";
-  exit_code = img2bin_pack_run_with_executable_path(9, argv, pack_exe);
-  TEST_ASSERT(exit_code == 6, "Naming a missing folder in --folders must fail the run.");
-}
-
 #ifdef _WIN32
 static void test_windows_icon_resource_for_executable(const char *exe_name)
 {
@@ -2691,6 +2481,7 @@ int main(void)
 {
   test_raw_encoder_golden_values();
   test_alpha_edges_and_background_blend();
+  test_raw_alpha_golden_values();
   test_imprle_segments_for_group_sizes();
   test_imprle_split_boundaries();
   test_imprle_reference_sample();
@@ -2714,6 +2505,7 @@ int main(void)
   test_default_mode_creates_missing_directories();
   test_cli_default_mode_and_unicode_paths();
   test_error_json_for_invalid_cli();
+  test_alpha_mask_cli_tool_gate();
   test_positional_single_file_and_input_conflict();
   test_positional_batch_manifest_and_order();
   test_batch_error_json_ndjson();
@@ -2722,16 +2514,6 @@ int main(void)
   test_qoi_cli_and_manifest();
   test_qoif_cli_and_manifest();
   test_indexqoi_cli_and_manifest();
-  test_pack_json_parser();
-  test_pack_bin_name_parsing();
-  test_pack_symbol_sanitize();
-  test_pack_codegen_combined_golden();
-  test_pack_codegen_split_mode();
-  test_pack_config_parsing();
-  test_pack_info_json();
-  test_pack_discovery_finds_tools();
-  test_pack_end_to_end();
-  test_pack_folder_selection_and_emit();
   test_resource_header_golden();
   test_decoder_roundtrip_all();
   test_decoder_rejects_damage();
@@ -2748,7 +2530,6 @@ int main(void)
   test_windows_version_resource_for_executable("img2bin_qoi.exe");
   test_windows_version_resource_for_executable("img2bin_qoif.exe");
   test_windows_version_resource_for_executable("img2bin_indexqoi.exe");
-  test_windows_version_resource_for_executable("img2bin_pack.exe");
 #endif
 
   if (g_test_failures != 0) {

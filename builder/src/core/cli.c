@@ -90,8 +90,11 @@ static int img2bin_parse_formats_csv(const char *value, img2bin_cli_options_t *o
     return 0;
   }
 
+  options->formats_all = 0;
+
   if (img2bin_stricmp(value, "all") == 0) {
     img2bin_set_all_formats(options);
+    options->formats_all = 1;
     return 1;
   }
 

@@ -35,6 +35,7 @@ static const img2bin_tool_descriptor_t g_img2bin_rle_tool = {
   "rle",
   "img2bin_rle-manifest.json",
   0,
+  0,
   IMG2BIN_HEADER_ALGO_RLE,
   img2bin_rle_encode_adapter
 };

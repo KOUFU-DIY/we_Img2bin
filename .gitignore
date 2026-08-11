@@ -9,7 +9,7 @@ builder/gui_tauri/dist/
 builder/gui_tauri/src-tauri/target/
 builder/gui_tauri/*.log
 
-# 批处理生成结果
+# 工具输出结果（任意层级的 output 目录，如 windows/tools/output）
 output/
 
 # 临时文件

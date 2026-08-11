@@ -3,13 +3,15 @@
 #include <string.h>
 
 typedef struct img2bin_decode_spec_s {
-  uint8_t bytes_per_pixel;
+  uint8_t bytes_per_pixel; /* 亚字节格式（A4/A2/A1）为 0 */
   uint8_t r_bits;
   uint8_t g_bits;
   uint8_t b_bits;
   uint8_t a_bits; /* 0 = 无 Alpha */
   uint8_t supports_rgb_chunk;
   uint8_t rgb_chunk_size;
+  uint8_t bits_per_pixel;
+  uint8_t is_alpha_only; /* Alpha 蒙版家族：仅 raw 算法 + 行打包语义 */
 } img2bin_decode_spec_t;
 
 typedef struct img2bin_decode_state_s {
@@ -25,15 +27,19 @@ typedef struct img2bin_decode_index_entry_s {
 } img2bin_decode_index_entry_t;
 
 static const img2bin_decode_spec_t IMG2BIN_DECODE_SPECS[IMG2BIN_DECODE_FMT_COUNT] = {
-  { 4, 8, 8, 8, 8, 1, 3 }, /* ARGB8888 */
-  { 3, 6, 6, 6, 6, 0, 0 }, /* ARGB6666 */
-  { 2, 4, 4, 4, 4, 0, 0 }, /* ARGB4444 */
-  { 1, 2, 2, 2, 2, 0, 0 }, /* ARGB2222 */
-  { 3, 5, 6, 5, 8, 1, 2 }, /* ARGB8565 */
-  { 3, 8, 8, 8, 0, 1, 3 }, /* RGB888 */
-  { 2, 5, 6, 5, 0, 1, 2 }, /* RGB565 */
-  { 1, 3, 3, 2, 0, 1, 1 }, /* RGB332 */
-  { 2, 5, 5, 5, 1, 0, 0 }  /* RAGB5155 */
+  { 4, 8, 8, 8, 8, 1, 3, 32, 0 }, /* ARGB8888 */
+  { 3, 6, 6, 6, 6, 0, 0, 24, 0 }, /* ARGB6666 */
+  { 2, 4, 4, 4, 4, 0, 0, 16, 0 }, /* ARGB4444 */
+  { 1, 2, 2, 2, 2, 0, 0, 8, 0 },  /* ARGB2222 */
+  { 3, 5, 6, 5, 8, 1, 2, 24, 0 }, /* ARGB8565 */
+  { 3, 8, 8, 8, 0, 1, 3, 24, 0 }, /* RGB888 */
+  { 2, 5, 6, 5, 0, 1, 2, 16, 0 }, /* RGB565 */
+  { 1, 3, 3, 2, 0, 1, 1, 8, 0 },  /* RGB332 */
+  { 2, 5, 5, 5, 1, 0, 0, 16, 0 }, /* RAGB5155 */
+  { 1, 0, 0, 0, 8, 0, 0, 8, 1 },  /* A8 */
+  { 0, 0, 0, 0, 4, 0, 0, 4, 1 },  /* A4 */
+  { 0, 0, 0, 0, 2, 0, 0, 2, 1 },  /* A2 */
+  { 0, 0, 0, 0, 1, 0, 0, 1, 1 }   /* A1 */
 };
 
 static const img2bin_decode_spec_t *img2bin_decode_get_spec(img2bin_decode_format_t format)
@@ -48,6 +54,22 @@ size_t img2bin_decode_bytes_per_pixel(img2bin_decode_format_t format)
 {
   const img2bin_decode_spec_t *spec = img2bin_decode_get_spec(format);
   return spec != 0 ? spec->bytes_per_pixel : 0u;
+}
+
+size_t img2bin_decode_bits_per_pixel(img2bin_decode_format_t format)
+{
+  const img2bin_decode_spec_t *spec = img2bin_decode_get_spec(format);
+  return spec != 0 ? spec->bits_per_pixel : 0u;
+}
+
+size_t img2bin_decode_row_stride(img2bin_decode_format_t format, uint16_t width)
+{
+  const img2bin_decode_spec_t *spec = img2bin_decode_get_spec(format);
+
+  if (spec == 0 || width == 0u) {
+    return 0u;
+  }
+  return ((size_t)width * spec->bits_per_pixel + 7u) / 8u;
 }
 
 static uint8_t img2bin_decode_channel_max(uint8_t bits)
@@ -340,6 +362,11 @@ static img2bin_decode_status_t img2bin_decode_check_output(
   size_t output_capacity,
   size_t *out_expected)
 {
+  /* Alpha 蒙版家族按行打包，pixel_count 不足以确定 payload 大小；
+     这里是全部按像素计数的流式解码器的共同入口，统一挡下（含 A8）。 */
+  if (spec->is_alpha_only || spec->bytes_per_pixel == 0u) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
   if (pixel_count > SIZE_MAX / spec->bytes_per_pixel) {
     return IMG2BIN_DECODE_ERR_ARGUMENTS;
   }
@@ -383,6 +410,47 @@ img2bin_decode_status_t img2bin_decode_raw(
   if (expected > 0u) {
     memcpy(output, input, expected);
   }
+  *out_written = expected;
+  return IMG2BIN_DECODE_OK;
+}
+
+img2bin_decode_status_t img2bin_decode_raw_alpha(
+  const uint8_t *input,
+  size_t input_size,
+  img2bin_decode_format_t format,
+  uint16_t width,
+  uint16_t height,
+  uint8_t *output,
+  size_t output_capacity,
+  size_t *out_written)
+{
+  const img2bin_decode_spec_t *spec = img2bin_decode_get_spec(format);
+  size_t row_stride = 0u;
+  size_t expected = 0u;
+
+  if (spec == 0 || !spec->is_alpha_only || width == 0u || height == 0u ||
+      (input == 0 && input_size > 0u) || (output == 0 && output_capacity > 0u) || out_written == 0) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
+
+  *out_written = 0u;
+  row_stride = img2bin_decode_row_stride(format, width);
+  if (row_stride == 0u || row_stride > SIZE_MAX / (size_t)height) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
+  expected = row_stride * (size_t)height;
+
+  if (expected > output_capacity) {
+    return IMG2BIN_DECODE_ERR_OUTPUT_TOO_SMALL;
+  }
+  if (input_size < expected) {
+    return IMG2BIN_DECODE_ERR_TRUNCATED;
+  }
+  if (input_size > expected) {
+    return IMG2BIN_DECODE_ERR_TRAILING_DATA;
+  }
+
+  memcpy(output, input, expected);
   *out_written = expected;
   return IMG2BIN_DECODE_OK;
 }
@@ -716,6 +784,10 @@ static int img2bin_decode_format_from_nibble(uint8_t nibble, img2bin_decode_form
     case 0x8: *out_format = IMG2BIN_DECODE_FMT_ARGB8565; return 1;
     case 0x9: *out_format = IMG2BIN_DECODE_FMT_ARGB2222; return 1;
     case 0xA: *out_format = IMG2BIN_DECODE_FMT_RAGB5155; return 1;
+    case 0xB: *out_format = IMG2BIN_DECODE_FMT_A8; return 1;
+    case 0xC: *out_format = IMG2BIN_DECODE_FMT_A4; return 1;
+    case 0xD: *out_format = IMG2BIN_DECODE_FMT_A2; return 1;
+    case 0xE: *out_format = IMG2BIN_DECODE_FMT_A1; return 1;
     default: return 0; /* 0x2/0x3 旧枚举 RGB555/RGB444，0xF OLED 点阵保留 */
   }
 }
@@ -781,6 +853,23 @@ img2bin_decode_status_t img2bin_decode_image(
   payload = input + IMG2BIN_DECODE_HEADER_SIZE;
   payload_size = input_size - IMG2BIN_DECODE_HEADER_SIZE;
   pixel_count = (size_t)header.width * (size_t)header.height;
+
+  /* Alpha 蒙版家族只有 raw 算法；头里出现其他组合视为损坏流。 */
+  {
+    const img2bin_decode_spec_t *spec = img2bin_decode_get_spec(header.format);
+
+    if (spec != 0 && spec->is_alpha_only) {
+      if (header.algorithm_nibble != (uint8_t)IMG2BIN_DECODE_ALGO_RAW) {
+        return IMG2BIN_DECODE_ERR_CORRUPT;
+      }
+      status = img2bin_decode_raw_alpha(
+        payload, payload_size, header.format, header.width, header.height, output, output_capacity, out_written);
+      if (status == IMG2BIN_DECODE_OK && out_header != 0) {
+        *out_header = header;
+      }
+      return status;
+    }
+  }
 
   switch ((img2bin_decode_algorithm_t)header.algorithm_nibble) {
     case IMG2BIN_DECODE_ALGO_RAW:

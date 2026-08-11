@@ -47,7 +47,10 @@
 .\img2bin_raw.exe --format rgb565
 .\img2bin_raw.exe --formats all
 .\img2bin_raw.exe --input .\demo.png --output .\out --format argb8888
+.\img2bin_raw.exe --input .\icon.png --output .\out --format a4
 ```
+
+特有能力：Alpha 蒙版格式 `a8 / a4 / a2 / a1`（只保存透明度通道，供 GUI 运行时染色）**只有本工具支持**。其余五个工具显式点名这些格式会报错退出（码 1），`--formats all` 会自动跳过。蒙版的行打包规则见[像素格式说明](README-formats.md)。
 
 ## 2. img2bin_imprle.exe
 

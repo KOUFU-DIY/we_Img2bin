@@ -35,6 +35,7 @@ static const img2bin_tool_descriptor_t g_img2bin_qoif_tool = {
   "qoif",
   "img2bin_qoif-manifest.json",
   0,
+  0,
   IMG2BIN_HEADER_ALGO_QOIF,
   img2bin_qoif_encode_adapter
 };

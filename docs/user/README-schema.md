@@ -1,18 +1,16 @@
 # 接口 Schema 说明
 
-本页逐字段说明所有机器可读输出，面向 GUI、自动化脚本和程序集成。共五类：
+本页逐字段说明所有机器可读输出，面向 GUI、自动化脚本和程序集成。共三类：
 
 1. 取模工具的 `--info` JSON
-2. 统筹管理器 `img2bin_pack.exe` 的 `--info` JSON
-3. 取模工具的批处理清单 `img2bin_<工具>-manifest.json`
-4. 统筹管理器的运行清单 `img2bin_pack-manifest.json`
-5. 错误 JSON
+2. 取模工具的批处理清单 `img2bin_<工具>-manifest.json`
+3. 错误 JSON
 
 通道约定：
 
 - `--info` 输出到 stdout，manifest 写入输出目录，均为 UTF-8 JSON
 - 错误 JSON 输出到 **stderr**，每条一行；批处理中每张失败图片各输出一行（NDJSON）
-- 版本字段随 `version.h` 演进；`schema_version` 当前为 `1.1.0`
+- 版本字段随 `version.h` 演进；`schema_version` 当前为 `1.2.0`（1.2.0 起：`pixel_formats[]` 新增 `bits_per_pixel` 与 `is_alpha_only` 字段，且格式列表**按工具而异**——Alpha 蒙版格式只出现在 `img2bin_raw` 的列表中）
 
 二进制侧的机器接口（6 字节通用资源头、算法/像素格式 nibble 编码表）见
 [协议与验证说明](README-protocol.md)的"通用资源头"一节。
@@ -37,7 +35,7 @@
 | `defaults.input_dir` / `defaults.output_dir` | string | `exe_dir/input`、`exe_dir/output` |
 | `defaults.background_color` | string | `RRGGBB`，默认 `000000` |
 | `defaults.index_interval` | string | 仅索引类工具存在，值 `image_width` |
-| `capabilities.*` | bool/array/string | 能力开关，字段名自描述；`supports_index_interval` 是 pack 判断是否传 `--index-interval` 的依据 |
+| `capabilities.*` | bool/array/string | 能力开关，字段名自描述；集成方可用 `supports_index_interval` 判断是否可传 `--index-interval` |
 | `invocation.style` | string | 固定 `flag_cli` |
 | `invocation.info_flag` / `invocation.help_flag` | string | `--info` / `--help` |
 | `invocation.arguments[]` | array | 参数元数据，见下表 |
@@ -49,7 +47,7 @@
 | `output.resource_header.algorithm_nibble` | number | 本工具的算法 nibble（写入格式码高 4 位） |
 | `output.resource_header.layout` | string | `type:1,algo_format:1,width_be:2,height_be:2` |
 | `exit_codes` | object | 见"退出码"一节 |
-| `pixel_formats[]` | array | 支持的像素格式，见下表 |
+| `pixel_formats[]` | array | **本工具**支持的像素格式（按工具而异：Alpha 蒙版 `a8/a4/a2/a1` 只在 `img2bin_raw` 中列出），见下表 |
 
 `invocation.arguments[]` 每项：
 
@@ -74,11 +72,15 @@
 | --- | --- | --- |
 | `name` | string | 格式名（小写，用于 `--format` 与输出文件名） |
 | `display_name` | object | `{zh_cn, en}` |
-| `bytes_per_pixel` | number | 每像素字节数 |
+| `bytes_per_pixel` | number | 每像素字节数；**亚字节格式（`a4/a2/a1`）为 0**，尺寸计算须改用 `bits_per_pixel` |
+| `bits_per_pixel` | number | 每像素位数（1.2.0 新增；整字节格式 = 字节数×8） |
+| `is_alpha_only` | bool | 是否为 Alpha 蒙版格式（1.2.0 新增；`a8/a4/a2/a1` 为 true，仅存透明度、按行打包、仅 raw 算法） |
 | `stores_alpha` | bool | 是否存储 Alpha |
 | `uses_background_color` | bool | 是否参与背景色混合 |
 | `endianness_affects_output` | bool | 大小端是否改变输出字节 |
 | `header_nibble` | number | 该格式在通用资源头格式码低 4 位中的取值 |
+
+Alpha 蒙版 payload 大小按行计算：`行字节数 = (宽 × bits_per_pixel + 7) / 8`，总大小 = `高 × 行字节数`（行打包契约见[协议与验证说明](README-protocol.md)）。非 raw 工具收到显式点名的 Alpha 蒙版格式时报 CLI 错误（`code` 为 `cli_parse_failed`、退出码 1）；`--formats all` 则静默滤除。
 
 ### 退出码（取模工具）
 
@@ -92,25 +94,7 @@
 | 5 | `internal_error` | 内部错误 |
 | 6 | `batch_partial_failure` | 批处理部分失败 |
 
-## 二、pack `--info`
-
-与工具 `--info` 同一信封结构，差异：
-
-| 字段 | 说明 |
-| --- | --- |
-| `tool.id` | `img2bin_pack` |
-| `tool.kind` | `batch_orchestrator` |
-| （无 `algorithm` / `output` / `pixel_formats`） | pack 不做编码 |
-| `capabilities.folder_convention` | `input2<algorithm_code>` |
-| `capabilities.config_file` | `img2bin_pack.json` |
-| `capabilities.discovers_tools_via` | `--info` |
-| `capabilities.codegen_modes` | `["combined","split"]` |
-| `capabilities.codegen_outputs` | `["c","h"]` |
-| `capabilities.manifest_file` | `img2bin_pack-manifest.json` |
-| `invocation.arguments[]` | 简化条目：仅 `name`/`flag`/`type` |
-| `exit_codes` | 0 `success`、1 `cli_error`、2 `input_error`、5 `internal_error`、6 `batch_partial_failure` |
-
-## 三、取模工具 manifest（`img2bin_<工具>-manifest.json`）
+## 二、取模工具 manifest（`img2bin_<工具>-manifest.json`）
 
 目录批处理时写入输出目录。
 
@@ -152,38 +136,7 @@
 }
 ```
 
-## 四、pack manifest（`img2bin_pack-manifest.json`）
-
-写入默认输出目录。
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `tool.id` / `tool.version` | string | `img2bin_pack` |
-| `run.root` | string | 工作目录（绝对路径） |
-| `run.output_directory` / `run.tools_directory` | string | 输出目录 / 工具目录 |
-| `run.discovered_tools[]` | array | 每项 `{tool_id, algorithm_code, supports_index_interval}` |
-| `summary.folders_total` | number | 参与的文件夹数 |
-| `summary.folders_succeeded` / `folders_partial` / `folders_failed` / `folders_skipped` | number | 各状态计数 |
-| `summary.collected_bin_files_total` | number | 从各工具 manifest 汇总的 bin 数 |
-| `folders[]` | array | 每个文件夹一项，见下 |
-| `codegen.enabled` | bool | 是否生成 `.c/.h` |
-| `codegen.mode` | string | `combined` / `split` |
-| `codegen.generated_files[]` | array | 生成文件的绝对路径 |
-
-`folders[]` 每项：
-
-| 字段 | 说明 |
-| --- | --- |
-| `folder` | 文件夹名 |
-| `input_directory` / `output_directory` | 绝对路径 |
-| `tool_id` / `algorithm_code` | 分派到的工具（未匹配时 `tool_id` 为空） |
-| `status` | `success` / `partial` / `error` / `no_tool` / `skipped_empty` |
-| `exit_code` | 子工具退出码；未执行为 -1 |
-| `images_found` | 该文件夹中的图片数 |
-| `outputs[]` | 该文件夹产生的 bin 绝对路径（取自子工具 manifest） |
-| `detail` | 失败时的补充信息（含子工具输出尾部） |
-
-## 五、错误 JSON
+## 三、错误 JSON
 
 所有程序的致命错误都在 **stderr** 输出单行 JSON；批处理里每张失败图片各一行（NDJSON），可逐行解析：
 
@@ -193,18 +146,18 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| `code` | 机器可读错误码（如 `cli_invalid`、`image_load_failed`、`input_path_invalid`、`no_tools_found`、`config_invalid`） |
+| `code` | 机器可读错误码（如 `cli_parse_failed`、`image_load_failed`、`input_path_invalid`） |
 | `exit_code` | 对应的进程退出码 |
 | `message` | `{zh_cn, en}` 人类可读消息 |
 | `file` | 涉及的文件（可选） |
 | `detail` | 补充细节（可选） |
-| `stage` | 出错阶段，如 `cli` / `scan` / `load` / `encode` / `write`（pack 错误无此字段） |
+| `stage` | 出错阶段，如 `cli` / `scan` / `load` / `encode` / `write` |
 
 错误码集合允许扩展，集成方应把未知 `code` 当作一般错误处理，以 `exit_code` 决定流程。
 
-## 六、输出文件名协议
+## 四、输出文件名协议
 
-`.bin` 文件名本身是机器接口，pack 的 codegen 完全依赖它：
+`.bin` 文件名本身是机器接口，下游资源管线（如 bin2c 类工具或自动化脚本）可直接解析它取得元数据：
 
 ```text
 <原图名>_<像素格式>_<算法>_<be|le>_<宽>x<高>.bin

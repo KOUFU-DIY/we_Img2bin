@@ -17,6 +17,9 @@ typedef struct img2bin_cli_options_s {
   int show_info;
   int list_formats;
   int index_interval_specified;
+  /* --formats all 置 1：格式清单是"全部"语义，工具骨架据此把本工具
+     不支持的格式静默过滤掉；显式点名的格式不支持时则报 CLI 错误。 */
+  int formats_all;
   size_t format_count;
   size_t positional_input_count;
   const char *positional_inputs[IMG2BIN_CLI_MAX_POSITIONAL_INPUTS];

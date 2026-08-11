@@ -35,6 +35,7 @@ static const img2bin_tool_descriptor_t g_img2bin_imprle_tool = {
   "imprle",
   "img2bin_imprle-manifest.json",
   0,
+  0,
   IMG2BIN_HEADER_ALGO_IMPRLE,
   img2bin_imprle_encode_adapter
 };

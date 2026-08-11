@@ -50,6 +50,11 @@ int img2bin_encode_rle_image(
     return 0;
   }
 
+  if (info->is_alpha_only) {
+    img2bin_set_error(error_buffer, error_buffer_size, "Alpha mask formats are only supported by the raw tool.");
+    return 0;
+  }
+
   if (!img2bin_encode_raw_image(
         format,
         endianness,
