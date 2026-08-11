@@ -4,7 +4,7 @@ img2bin tools V0.0.1
 
 如果你希望看更详细的用户说明，请打开：
 - docs\user\README.md
-- docs\user\README-tools.md
+- docs\user\README-tools.md（总览；每个工具另有 README-img2bin_<工具>.md 单独说明）
 - docs\user\README-formats.md
 - docs\user\README-decoder.md
 - docs\user\README-protocol.md

@@ -37,7 +37,7 @@ img2c/
 ## 用户文档
 
 - [用户总览](docs/user/README.md)
-- [工具说明](docs/user/README-tools.md)
+- [工具说明](docs/user/README-tools.md)（每个工具另有单独文档 docs/user/README-img2bin_<工具>.md）
 - [像素格式说明](docs/user/README-formats.md)
 - [解码编写说明](docs/user/README-decoder.md)
 - [协议与验证说明](docs/user/README-protocol.md)

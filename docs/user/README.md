@@ -14,7 +14,7 @@
 
 ## 文档导航
 
-- [工具说明](README-tools.md)
+- [工具说明](README-tools.md)（总览与共同行为；每个工具另有单独文档，见下表）
 - [像素格式说明](README-formats.md)
 - [解码编写说明](README-decoder.md)（含现成的 C99 参考解码器）
 - [协议与验证说明](README-protocol.md)
@@ -22,14 +22,14 @@
 
 ## 各个程序分别做什么
 
-| 程序 | 用途 |
-| --- | --- |
-| `img2bin_raw.exe` | 无压缩输出（含 Alpha 蒙版格式 `a8/a4/a2/a1`） |
-| `img2bin_imprle.exe` | 改进 RLE 压缩输出 |
-| `img2bin_rle.exe` | 原始 RLE 压缩输出 |
-| `img2bin_qoi.exe` | 原始 QOI 压缩输出 |
-| `img2bin_qoif.exe` | 原始 QOI（无字典）压缩输出 |
-| `img2bin_indexqoi.exe` | 索引 QOI V2（静态调色盘）压缩输出 |
+| 程序 | 用途 | 单独文档 |
+| --- | --- | --- |
+| `img2bin_raw.exe` | 无压缩输出（含 Alpha 蒙版格式 `a8/a4/a2/a1`） | [README-img2bin_raw.md](README-img2bin_raw.md) |
+| `img2bin_imprle.exe` | 改进 RLE 压缩输出 | [README-img2bin_imprle.md](README-img2bin_imprle.md) |
+| `img2bin_rle.exe` | 原始 RLE 压缩输出 | [README-img2bin_rle.md](README-img2bin_rle.md) |
+| `img2bin_qoi.exe` | 原始 QOI 压缩输出 | [README-img2bin_qoi.md](README-img2bin_qoi.md) |
+| `img2bin_qoif.exe` | 原始 QOI（无字典）压缩输出 | [README-img2bin_qoif.md](README-img2bin_qoif.md) |
+| `img2bin_indexqoi.exe` | 索引 QOI V2（静态调色盘）压缩输出 | [README-img2bin_indexqoi.md](README-img2bin_indexqoi.md) |
 
 发布目录中，六个取模工具在 `windows\tools\`。
 
