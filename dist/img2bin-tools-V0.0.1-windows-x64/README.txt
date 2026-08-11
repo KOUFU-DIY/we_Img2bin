@@ -51,7 +51,7 @@ img2bin tools V0.0.1
   <原名>_<像素格式>_qoif_<be|le>_<宽>x<高>.bin
 
 - img2bin_indexqoi.exe:
-  输出索引QOI压缩像素格式 bin
+  输出索引QOI V2(静态调色盘)压缩像素格式 bin
   默认索引间隔为图片宽度，可用 --index-interval 自定义
   输出文件命名:
   <原名>_<像素格式>_indexqoi_<be|le>_<宽>x<高>.bin

@@ -28,7 +28,7 @@
 | `img2bin_rle.exe` | 原始 RLE 压缩输出 |
 | `img2bin_qoi.exe` | 原始 QOI 压缩输出 |
 | `img2bin_qoif.exe` | 原始 QOI（无字典）压缩输出 |
-| `img2bin_indexqoi.exe` | 索引 QOI 压缩输出 |
+| `img2bin_indexqoi.exe` | 索引 QOI V2（静态调色盘）压缩输出 |
 
 发布目录中，六个取模工具在 `windows\tools\`。
 

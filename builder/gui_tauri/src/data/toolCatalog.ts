@@ -58,9 +58,9 @@ export const tools: ToolInfo[] = [
   },
   {
     id: "img2bin_indexqoi",
-    label: "索引 QOI",
+    label: "索引 QOI V2",
     category: "QOI",
-    summary: "带索引表，支持局部跳转。",
+    summary: "带索引表与静态调色盘，支持局部跳转。",
     token: "indexqoi",
     command: "img2bin_indexqoi.exe",
     priority: 60,

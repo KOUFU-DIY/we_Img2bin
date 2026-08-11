@@ -204,7 +204,7 @@ while (1) {
 
 - `QOI`：原始 QOI，带 64 项字典索引
 - `QOIF`：原始 QOI（无字典）
-- `indexQOI`：索引 QOI，文件头 + 索引表 + `QOIF` payload
+- `indexQOI`（V2）：索引 QOI + 静态调色盘，索引头 + 索引表 + 调色盘 + 数据流 + `0xA0 0x88` 结尾标志
 
 ## 和标准 QOI 的相同点
 
@@ -238,18 +238,20 @@ while (1) {
 
 ## 六、QOI opcode 规则
 
-## 1. OP_INDEX
+## 1. OP_INDEX / 调色盘 op
 
 ```text
 0x00..0x3F
 ```
 
-只在 `img2bin_qoi.exe` 中出现。  
-`QOIF` 和 `indexQOI` 都不会输出它。
+这段 op 空间在不同算法里含义不同：
 
-索引表大小固定 64 项。
+- `img2bin_qoi.exe`：哈希字典 op（下述规则）
+- `indexQOI`（V2）：**静态调色盘 op**，`当前像素 = 调色盘第 op 项`（见第九章），
+  零哈希、零 RAM 字典
+- `QOIF`：不会输出
 
-哈希公式：
+`QOI` 的哈希字典固定 64 项，哈希公式：
 
 ```text
 hash = (r * 3 + g * 5 + b * 7 + a * 11) & 63
@@ -343,6 +345,11 @@ count = (opcode & 0x3F) + 1
 | `RGB565` | 2 字节 |
 | `RGB332` | 1 字节 |
 
+注意算法差异：**`indexQOI`（V2）中 `0xFE` 只用于 `ARGB8888` / `ARGB8565`**
+（剥透明度全量，能省 1 字节的两种格式）；非 Alpha 格式在 `indexQOI` 里
+全量一律用 `0xFF`。上表中 `RGB888/RGB565/RGB332` 的 `0xFE` 行只适用于
+`QOI` / `QOIF`。
+
 ## 6. OP_RGBA
 
 ```text
@@ -408,63 +415,92 @@ A4, R4, G4, B4
 
 如果你只需要实现一种更简单的解码器，通常建议优先实现 `QOIF`。
 
-## 九、indexQOI 解码
+## 九、indexQOI（V2，静态调色盘）解码
 
-`indexQOI = 6字节通用资源头 + 13字节索引头 + 索引表 + QOIF payload`
+```text
+indexQOI = 6字节通用资源头 + 14字节索引头 + u16索引区 + u24索引区
+         + u32索引区 + 静态调色盘 + QOI数据流 + 0xA0 0x88
+```
+
+一句话定义：indexQOI V2 = 索引 QOI + 静态字典（调色盘）。在保留“通过索引
+从任意位置空降解码”的同时，用一张编码时统计生成的全局调色盘把高频的
+“难压缩颜色”压成单字节 op；解码器零 RAM 字典、零哈希计算，调色盘直接
+存放在图像数据内（可原地读 flash）。
 
 本节的偏移量都相对**通用资源头之后**（即文件第 7 字节起）。
 
 ## 1. 索引头格式
 
-固定 13 字节：
+固定 14 字节：
 
 ```text
-byte0   = 头长度，当前固定 0x0D
-byte1-2 = 宽度，16bit，大端
-byte3-4 = 高度，16bit，大端
-byte5-6 = 索引间隔，16bit，大端
-byte7-8 = u16 索引区字节长度，16bit，大端
+byte0    = 头长度，当前固定 0x0E（兼作版本标识；旧 V1 的 0x0D 视为不支持）
+byte1-2  = 宽度，16bit，大端
+byte3-4  = 高度，16bit，大端
+byte5-6  = 索引间隔，16bit，大端
+byte7-8  = u16 索引区字节长度，16bit，大端
 byte9-10 = u24 索引区字节长度，16bit，大端
 byte11-12 = u32 索引区字节长度，16bit，大端
+byte13   = 调色盘条目数，0..64（0 = 无调色盘，不必填满）
 ```
 
-## 2. payload 起始位置
+前 13 字节与旧版 indexQOI 头逐字节同构，仅在尾部追加 1 字节。
+
+## 2. 调色盘与数据流起始位置
 
 ```text
-payload_pos = 13 + u16_bytes + u24_bytes + u32_bytes
+palette_pos = 14 + u16_bytes + u24_bytes + u32_bytes
+stream_pos  = palette_pos + 调色盘条目数 × 每像素字节数
 ```
 
-## 3. 索引值的含义
+调色盘每项就是一个**完整原始格式像素**（含 Alpha），字节序与 `0xFF`
+全量像素完全相同（受取模时大小端开关影响）：`RGB565` 2 字节、`RGB888`
+3 字节、`RGB332`/`ARGB2222` 1 字节、`ARGB8888` 4 字节、`ARGB6666`/
+`ARGB8565` 3 字节、`ARGB4444`/`RAGB5155` 2 字节。调色盘全局有效，
+解码过程中永不修改。
+
+## 3. 调色盘 op
+
+```text
+op ∈ 0x00..0x3F 且 op < 调色盘条目数：
+    当前像素 = 调色盘第 op 项（含 Alpha，可表达透明度变化）
+```
+
+- 编码器保证 op 不超出条目数；解码器遇到 `op >= 条目数` 应按损坏流处理
+- 查到的条目要**解包成量化通道状态**（供后续 `DIFF/LUMA` 使用），
+  再照常打包输出——参考实现直接走 `0xFF` 全量的解包路径
+- 其余 op（`DIFF/LUMA/RUN/0xFE/0xFF`）与 `QOIF` 完全相同；
+  `0xFE` 只用于 `ARGB8888` / `ARGB8565`
+
+## 4. 结尾标志
+
+数据流末尾固定跟 2 字节 `0xA0 0x88`。解码按像素数“到数即停”，
+标志用于整体完整性校验（参考实现在解码完最后一个像素后强制校验）。
+注意它不能靠扫描定位——`0xA0 0x88` 也可能作为普通数据出现在流中间。
+
+## 5. 索引值的含义
 
 每个索引值都是：
 
 ```text
-相对 payload 起点的字节偏移
+相对 QOI 数据流起点（stream_pos）的字节偏移
 ```
 
-不是相对文件起点。
-
-因此真正的 payload 指针是：
+不是相对文件起点。真正的数据指针是：
 
 ```text
-target = payload_start + offset
+target = stream_start + offset
 ```
 
-## 4. 索引点是什么
+## 6. 索引点（段首）规则
 
-当前实现中：
+- 默认索引间隔 = 图片宽度，也可由 `--index-interval` 指定
+- 每 `间隔` 个像素为一“段”，段首即索引点
+- 段首前编码器必然已强制结束 RUN（RUN 不跨段）
+- 段首 op 只可能是两种：**调色盘 op**（颜色在盘中）或 **`0xFF` 原始全量**，
+  两者都不依赖任何上文，因此从索引空降解码是自包含的
 
-- 默认索引间隔 = 图片宽度
-- 也可由 `--index-interval` 指定
-- 每到一个索引位置，编码器都会取消压缩，直接写一个原始像素块
-
-因此你可以：
-
-1. 选中某个索引
-2. 直接跳到对应 payload 偏移
-3. 从那个像素位置继续往后解码
-
-## 5. 如何定位第 N 个像素
+## 7. 如何定位第 N 个像素
 
 设：
 
@@ -477,33 +513,31 @@ target = payload_start + offset
 index_slot = pixel_index / interval
 base_pixel = index_slot * interval
 offset = 第 index_slot 个索引值
-cursor = payload_start + offset
+cursor = stream_start + offset
 ```
 
-然后从 `cursor` 开始解码，初始像素位置就是 `base_pixel`。
+然后从 `cursor` 开始解码，初始像素位置就是 `base_pixel`，无状态需复位
+（调色盘全局有效）。
 
-## 6. indexQOI 和普通 QOIF 的关系
+## 8. indexQOI 和普通 QOIF 的关系
 
-`indexQOI` 的 payload 部分，本质上就是一条特殊的 `QOIF`：
+在 `QOIF` 解码器基础上仅需三处改动，无需任何 RAM 字典：
 
-- 不使用字典索引
-- 在索引位置强制输出原始像素块
-
-因此如果你已经写好了 `QOIF` 解码器，只需要：
-
-1. 先解析 `indexQOI` 头和索引表
-2. 再把 payload 当作 `QOIF` 解
+1. 初始化时从头解析出调色盘位置（只需一次）
+2. 解码循环新增一个 `op < 条目数` 的查盘分支
+3. 解码完最后一个像素后校验 `0xA0 0x88`
 
 ## 十、当前实现中的关键兼容约定
 
 这些点最容易在不同实现之间产生分歧，建议你直接按这里实现：
 
-- `QOI / QOIF` 没有标准 QOI 头
-- `QOI / QOIF / indexQOI` 没有尾部结束码
-- `indexQOI` 偏移值相对的是 payload 起点，不是文件起点
-- `indexQOI` 中：
-  - 非 Alpha 格式原始块使用 `0xFE`
-  - 带 Alpha 格式原始块使用 `0xFF`
+- `QOI / QOIF` 没有标准 QOI 头，也没有尾部结束码
+- `indexQOI`（V2）数据流末尾固定为 `0xA0 0x88`
+- `indexQOI` 偏移值相对的是 QOI 数据流起点（调色盘之后），不是文件起点
+- `0xFE`（剥透明度全量）的适用范围：
+  - `QOI / QOIF`：非 Alpha 格式与 `ARGB8888/ARGB8565` 都可能使用
+  - `indexQOI`（V2）：**只用于 `ARGB8888/ARGB8565`**，非 Alpha 格式全量一律 `0xFF`
+- `indexQOI` 段首只允许 调色盘 op 或 `0xFF`
 - `RGB888` 在当前实现里按工具定义的字节顺序处理
 
 ## 十一、推荐的实现顺序

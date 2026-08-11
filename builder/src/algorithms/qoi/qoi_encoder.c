@@ -172,33 +172,22 @@ static void img2bin_qoi_pack_rgb565(uint8_t r, uint8_t g, uint8_t b, img2bin_end
   img2bin_qoi_write_u16(value, endianness, out);
 }
 
-static void img2bin_qoi_make_pixel(
+/* 由“已量化到裁剪域的分量”打包出该格式的完整像素字节（含大小端），
+   供 make_pixel 与 indexQOI V2 调色盘条目共用。 */
+static void img2bin_qoi_pack_quantized(
   img2bin_pixel_format_t format,
   img2bin_endianness_t endianness,
-  img2bin_rgb_t background,
-  img2bin_rgba_t source,
+  uint8_t r,
+  uint8_t g,
+  uint8_t b,
+  uint8_t a,
   img2bin_qoi_pixel_t *out_pixel)
 {
-  img2bin_qoi_format_spec_t spec;
-  img2bin_rgb_t blended;
-
   memset(out_pixel, 0, sizeof(*out_pixel));
-  img2bin_qoi_get_format_spec(format, &spec);
-  blended = img2bin_qoi_blend_to_background(source, background);
-
-  if (spec.has_alpha) {
-    out_pixel->a = (spec.a_bits == 1u)
-                     ? img2bin_qoi_quantize_alpha_1(source.a)
-                     : img2bin_qoi_quantize_channel(source.a, spec.a_bits);
-    out_pixel->r = img2bin_qoi_quantize_channel(source.r, spec.r_bits);
-    out_pixel->g = img2bin_qoi_quantize_channel(source.g, spec.g_bits);
-    out_pixel->b = img2bin_qoi_quantize_channel(source.b, spec.b_bits);
-  } else {
-    out_pixel->a = 255u;
-    out_pixel->r = img2bin_qoi_quantize_channel(blended.r, spec.r_bits);
-    out_pixel->g = img2bin_qoi_quantize_channel(blended.g, spec.g_bits);
-    out_pixel->b = img2bin_qoi_quantize_channel(blended.b, spec.b_bits);
-  }
+  out_pixel->r = r;
+  out_pixel->g = g;
+  out_pixel->b = b;
+  out_pixel->a = a;
 
   switch (format) {
     case IMG2BIN_FMT_ARGB8888:
@@ -313,6 +302,40 @@ static void img2bin_qoi_make_pixel(
   }
 }
 
+static void img2bin_qoi_make_pixel(
+  img2bin_pixel_format_t format,
+  img2bin_endianness_t endianness,
+  img2bin_rgb_t background,
+  img2bin_rgba_t source,
+  img2bin_qoi_pixel_t *out_pixel)
+{
+  img2bin_qoi_format_spec_t spec;
+  img2bin_rgb_t blended;
+  uint8_t r = 0u;
+  uint8_t g = 0u;
+  uint8_t b = 0u;
+  uint8_t a = 0u;
+
+  img2bin_qoi_get_format_spec(format, &spec);
+  blended = img2bin_qoi_blend_to_background(source, background);
+
+  if (spec.has_alpha) {
+    a = (spec.a_bits == 1u)
+          ? img2bin_qoi_quantize_alpha_1(source.a)
+          : img2bin_qoi_quantize_channel(source.a, spec.a_bits);
+    r = img2bin_qoi_quantize_channel(source.r, spec.r_bits);
+    g = img2bin_qoi_quantize_channel(source.g, spec.g_bits);
+    b = img2bin_qoi_quantize_channel(source.b, spec.b_bits);
+  } else {
+    a = 255u;
+    r = img2bin_qoi_quantize_channel(blended.r, spec.r_bits);
+    g = img2bin_qoi_quantize_channel(blended.g, spec.g_bits);
+    b = img2bin_qoi_quantize_channel(blended.b, spec.b_bits);
+  }
+
+  img2bin_qoi_pack_quantized(format, endianness, r, g, b, a, out_pixel);
+}
+
 static void img2bin_qoi_make_default_previous(
   img2bin_pixel_format_t format,
   img2bin_endianness_t endianness,
@@ -422,34 +445,12 @@ static void img2bin_qoi_emit_run(unsigned char *output, size_t *output_size, siz
   *run = 0u;
 }
 
-static void img2bin_qoi_emit_raw_chunk(
-  const img2bin_qoi_format_spec_t *spec,
-  const img2bin_qoi_pixel_t *pixel,
-  unsigned char *output,
-  size_t *output_size)
-{
-  if (spec != NULL && !spec->has_alpha && pixel != NULL && pixel->supports_rgb_chunk) {
-    output[(*output_size)++] = IMG2BIN_QOI_OP_RGB;
-    memcpy(output + *output_size, pixel->rgb, pixel->rgb_size);
-    *output_size += pixel->rgb_size;
-    return;
-  }
-
-  if (pixel != NULL) {
-    output[(*output_size)++] = IMG2BIN_QOI_OP_RGBA;
-    memcpy(output + *output_size, pixel->full, pixel->full_size);
-    *output_size += pixel->full_size;
-  }
-}
-
 static int img2bin_encode_qoi_payload(
   img2bin_pixel_format_t format,
   img2bin_endianness_t endianness,
   img2bin_rgb_t background,
   const img2bin_image_t *image,
   int enable_lookup_index,
-  unsigned int forced_raw_interval,
-  img2bin_qoi_index_list_t *index_list,
   const char *variant_name,
   unsigned char **out_payload,
   size_t *out_payload_size,
@@ -503,31 +504,12 @@ static int img2bin_encode_qoi_payload(
     img2bin_rgba_t rgba;
     img2bin_qoi_pixel_t current;
     unsigned int hash_index = 0;
-    int is_forced_raw_index = forced_raw_interval > 0u && (pixel_index % (size_t)forced_raw_interval) == 0u;
 
     rgba.r = source[0];
     rgba.g = source[1];
     rgba.b = source[2];
     rgba.a = source[3];
     img2bin_qoi_make_pixel(format, endianness, background, rgba, &current);
-
-    if (is_forced_raw_index) {
-      img2bin_qoi_emit_run(output, &output_size, &run);
-      if (index_list != NULL && !img2bin_qoi_index_list_append(index_list, output_size)) {
-        free(output);
-        img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding %s image.", variant_name);
-        return 0;
-      }
-
-      hash_index = img2bin_qoi_hash_pixel(&current, &spec);
-      if (enable_lookup_index) {
-        index[hash_index] = current;
-      }
-
-      img2bin_qoi_emit_raw_chunk(&spec, &current, output, &output_size);
-      previous = current;
-      continue;
-    }
 
     if (img2bin_qoi_pixels_equal(&current, &previous)) {
       ++run;
@@ -603,8 +585,6 @@ int img2bin_encode_qoi_image(
     background,
     image,
     1,
-    0u,
-    NULL,
     "original QOI",
     out_buffer,
     out_size,
@@ -628,13 +608,372 @@ int img2bin_encode_qoif_image(
     background,
     image,
     0,
-    0u,
-    NULL,
     "original QOI without index",
     out_buffer,
     out_size,
     error_buffer,
     error_buffer_size);
+}
+
+/* =====================  indexQOI V2（静态调色盘）  =====================
+ *
+ * payload 布局：
+ *   [14字节索引头][u16索引区][u24索引区][u32索引区][调色盘][QOI数据流][0xA0 0x88]
+ * 索引头（恒大端）：
+ *   [0] 头长度 0x0E（同时是版本标识；V1 为 0x0D）
+ *   [1..2] 宽  [3..4] 高  [5..6] 像素索引间隔
+ *   [7..8] u16索引区字节数  [9..10] u24区字节数  [11..12] u32区字节数
+ *   [13] 调色盘条目数 0..64（0 = 无调色盘）
+ * 调色盘每项 = 一个完整原始格式像素（含 Alpha，字节序同 0xFF 全量）。
+ * 数据流 op：op<条目数 静态查盘；0x40 DIFF；0x80 LUMA；0xC0 RUN；
+ *   0xFE 剥透明度全量（仅 ARGB8888/ARGB8565）；0xFF 原始全量。
+ * 段首（索引点）只允许 调色盘op 或 0xFF，RUN 不跨段，空降解码自包含。
+ * 两遍法选盘：第一遍统计各颜色进盘可省字节，净收益 > 每像素字节数才有
+ * 资格；收益降序、同收益按 32 位有符号颜色键 (r<<24)|(g<<16)|(b<<8)|a
+ * 降序取前 64，保证选盘结果确定可对拍。
+ */
+
+#define IMG2BIN_INDEXQOI_HEADER_SIZE 14u
+#define IMG2BIN_INDEXQOI_PALETTE_MAX 64u
+#define IMG2BIN_INDEXQOI_END_MARKER_0 0xA0u
+#define IMG2BIN_INDEXQOI_END_MARKER_1 0x88u
+
+typedef struct img2bin_indexqoi_stat_s {
+  uint32_t key;
+  size_t savings;
+  uint8_t used;
+} img2bin_indexqoi_stat_t;
+
+typedef struct img2bin_indexqoi_stat_map_s {
+  img2bin_indexqoi_stat_t *slots;
+  size_t capacity; /* 2 的幂 */
+  size_t used;
+} img2bin_indexqoi_stat_map_t;
+
+typedef struct img2bin_indexqoi_palette_s {
+  size_t count;
+  uint32_t keys[IMG2BIN_INDEXQOI_PALETTE_MAX];
+  img2bin_qoi_pixel_t pixels[IMG2BIN_INDEXQOI_PALETTE_MAX];
+} img2bin_indexqoi_palette_t;
+
+static uint32_t img2bin_indexqoi_color_key(const img2bin_qoi_pixel_t *pixel)
+{
+  return ((uint32_t)pixel->r << 24) |
+         ((uint32_t)pixel->g << 16) |
+         ((uint32_t)pixel->b << 8) |
+         (uint32_t)pixel->a;
+}
+
+static size_t img2bin_indexqoi_stat_slot(const img2bin_indexqoi_stat_map_t *map, uint32_t key)
+{
+  size_t slot = (size_t)(key * 2654435761u) & (map->capacity - 1u);
+
+  while (map->slots[slot].used && map->slots[slot].key != key) {
+    slot = (slot + 1u) & (map->capacity - 1u);
+  }
+  return slot;
+}
+
+static int img2bin_indexqoi_stat_map_grow(img2bin_indexqoi_stat_map_t *map)
+{
+  img2bin_indexqoi_stat_map_t grown;
+  size_t index = 0u;
+
+  if (map->capacity > SIZE_MAX / 2u / sizeof(*grown.slots)) {
+    return 0;
+  }
+  grown.capacity = map->capacity * 2u;
+  grown.used = map->used;
+  grown.slots = (img2bin_indexqoi_stat_t *)calloc(grown.capacity, sizeof(*grown.slots));
+  if (grown.slots == NULL) {
+    return 0;
+  }
+
+  for (index = 0u; index < map->capacity; ++index) {
+    if (map->slots[index].used) {
+      grown.slots[img2bin_indexqoi_stat_slot(&grown, map->slots[index].key)] = map->slots[index];
+    }
+  }
+
+  free(map->slots);
+  *map = grown;
+  return 1;
+}
+
+static int img2bin_indexqoi_stat_map_add(img2bin_indexqoi_stat_map_t *map, uint32_t key, size_t savings)
+{
+  size_t slot = 0u;
+
+  if (map->used * 2u >= map->capacity && !img2bin_indexqoi_stat_map_grow(map)) {
+    return 0;
+  }
+
+  slot = img2bin_indexqoi_stat_slot(map, key);
+  if (!map->slots[slot].used) {
+    map->slots[slot].used = 1u;
+    map->slots[slot].key = key;
+    map->slots[slot].savings = 0u;
+    ++map->used;
+  }
+  map->slots[slot].savings += savings;
+  return 1;
+}
+
+/* 收益降序；同收益按 32 位有符号颜色键降序。 */
+static int img2bin_indexqoi_stat_compare(const void *lhs_ptr, const void *rhs_ptr)
+{
+  const img2bin_indexqoi_stat_t *lhs = (const img2bin_indexqoi_stat_t *)lhs_ptr;
+  const img2bin_indexqoi_stat_t *rhs = (const img2bin_indexqoi_stat_t *)rhs_ptr;
+
+  if (lhs->savings != rhs->savings) {
+    return lhs->savings > rhs->savings ? -1 : 1;
+  }
+  if ((int32_t)lhs->key != (int32_t)rhs->key) {
+    return (int32_t)lhs->key > (int32_t)rhs->key ? -1 : 1;
+  }
+  return 0;
+}
+
+static int img2bin_indexqoi_palette_find(const img2bin_indexqoi_palette_t *palette, uint32_t key)
+{
+  size_t index = 0u;
+
+  for (index = 0u; index < palette->count; ++index) {
+    if (palette->keys[index] == key) {
+      return (int)index;
+    }
+  }
+  return -1;
+}
+
+/* 第一遍：无调色盘模拟 op 分类，统计每个颜色若进盘可省的字节数。
+   调色盘替换不改变解码出的像素值，因此这里的分类与第二遍完全一致。 */
+static int img2bin_indexqoi_collect_stats(
+  img2bin_pixel_format_t format,
+  img2bin_endianness_t endianness,
+  img2bin_rgb_t background,
+  const img2bin_image_t *image,
+  unsigned int interval,
+  const img2bin_qoi_format_spec_t *spec,
+  img2bin_indexqoi_stat_map_t *map)
+{
+  img2bin_qoi_pixel_t previous;
+  size_t pixel_count = (size_t)image->width * (size_t)image->height;
+  size_t pixel_index = 0u;
+
+  img2bin_qoi_make_default_previous(format, endianness, &previous);
+
+  for (pixel_index = 0u; pixel_index < pixel_count; ++pixel_index) {
+    const unsigned char *source = image->pixels + (pixel_index * 4u);
+    img2bin_rgba_t rgba;
+    img2bin_qoi_pixel_t current;
+
+    rgba.r = source[0];
+    rgba.g = source[1];
+    rgba.b = source[2];
+    rgba.a = source[3];
+    img2bin_qoi_make_pixel(format, endianness, background, rgba, &current);
+
+    if ((pixel_index % (size_t)interval) == 0u) {
+      /* 索引点：0xFF 全量 -> 单字节调色盘 op，省 pix_size */
+      if (!img2bin_indexqoi_stat_map_add(map, img2bin_indexqoi_color_key(&current), current.full_size)) {
+        return 0;
+      }
+    } else if (img2bin_qoi_pixels_equal(&current, &previous)) {
+      /* RUN 像素不查盘，无收益 */
+    } else if (current.a == previous.a && img2bin_qoi_can_emit_diff(&current, &previous)) {
+      /* DIFF 1 字节 -> 1 字节，收益 0，不计 */
+    } else if (current.a == previous.a && img2bin_qoi_can_emit_luma(&current, &previous)) {
+      if (!img2bin_indexqoi_stat_map_add(map, img2bin_indexqoi_color_key(&current), 1u)) {
+        return 0;
+      }
+    } else if (current.a == previous.a && spec->has_alpha && current.supports_rgb_chunk) {
+      /* 0xFE 剥透明度全量 -> 调色盘 op，省 rgb_size（ARGB8888=3 / ARGB8565=2） */
+      if (!img2bin_indexqoi_stat_map_add(map, img2bin_indexqoi_color_key(&current), current.rgb_size)) {
+        return 0;
+      }
+    } else {
+      if (!img2bin_indexqoi_stat_map_add(map, img2bin_indexqoi_color_key(&current), current.full_size)) {
+        return 0;
+      }
+    }
+
+    previous = current;
+  }
+
+  return 1;
+}
+
+static int img2bin_indexqoi_build_palette(
+  const img2bin_indexqoi_stat_map_t *map,
+  img2bin_pixel_format_t format,
+  img2bin_endianness_t endianness,
+  size_t pix_size,
+  img2bin_indexqoi_palette_t *palette)
+{
+  img2bin_indexqoi_stat_t *candidates = NULL;
+  size_t candidate_count = 0u;
+  size_t index = 0u;
+
+  palette->count = 0u;
+  if (map->used == 0u) {
+    return 1;
+  }
+
+  candidates = (img2bin_indexqoi_stat_t *)malloc(map->used * sizeof(*candidates));
+  if (candidates == NULL) {
+    return 0;
+  }
+
+  for (index = 0u; index < map->capacity; ++index) {
+    /* 净收益必须超过调色盘自身的存储成本（每项 pix_size 字节） */
+    if (map->slots[index].used && map->slots[index].savings > pix_size) {
+      candidates[candidate_count++] = map->slots[index];
+    }
+  }
+
+  qsort(candidates, candidate_count, sizeof(*candidates), img2bin_indexqoi_stat_compare);
+
+  palette->count = candidate_count < IMG2BIN_INDEXQOI_PALETTE_MAX ? candidate_count : IMG2BIN_INDEXQOI_PALETTE_MAX;
+  for (index = 0u; index < palette->count; ++index) {
+    uint32_t key = candidates[index].key;
+
+    palette->keys[index] = key;
+    img2bin_qoi_pack_quantized(
+      format,
+      endianness,
+      (uint8_t)((key >> 24) & 0xFFu),
+      (uint8_t)((key >> 16) & 0xFFu),
+      (uint8_t)((key >> 8) & 0xFFu),
+      (uint8_t)(key & 0xFFu),
+      &palette->pixels[index]);
+  }
+
+  free(candidates);
+  return 1;
+}
+
+/* 第二遍：带调色盘正式编码 QOI 数据流（含 0xA0 0x88 结尾标志），并记录索引点偏移。 */
+static int img2bin_encode_indexqoi_stream(
+  img2bin_pixel_format_t format,
+  img2bin_endianness_t endianness,
+  img2bin_rgb_t background,
+  const img2bin_image_t *image,
+  unsigned int interval,
+  const img2bin_indexqoi_palette_t *palette,
+  img2bin_qoi_index_list_t *index_list,
+  unsigned char **out_stream,
+  size_t *out_stream_size,
+  char *error_buffer,
+  size_t error_buffer_size)
+{
+  img2bin_qoi_format_spec_t spec;
+  img2bin_qoi_pixel_t previous;
+  size_t pixel_count = (size_t)image->width * (size_t)image->height;
+  unsigned char *output = NULL;
+  size_t output_size = 0u;
+  size_t pixel_index = 0u;
+  size_t run = 0u;
+
+  img2bin_qoi_get_format_spec(format, &spec);
+
+  if (pixel_count > (SIZE_MAX - 2u) / 5u) {
+    img2bin_set_error(error_buffer, error_buffer_size, "Indexed QOI output would be too large.");
+    return 0;
+  }
+  output = (unsigned char *)malloc(pixel_count * 5u + 2u);
+  if (output == NULL) {
+    img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding indexed QOI image.");
+    return 0;
+  }
+
+  img2bin_qoi_make_default_previous(format, endianness, &previous);
+
+  for (pixel_index = 0u; pixel_index < pixel_count; ++pixel_index) {
+    const unsigned char *source = image->pixels + (pixel_index * 4u);
+    img2bin_rgba_t rgba;
+    img2bin_qoi_pixel_t current;
+    int palette_slot = -1;
+
+    rgba.r = source[0];
+    rgba.g = source[1];
+    rgba.b = source[2];
+    rgba.a = source[3];
+    img2bin_qoi_make_pixel(format, endianness, background, rgba, &current);
+
+    if ((pixel_index % (size_t)interval) == 0u) {
+      /* 段首：先强制结束 RUN（RUN 不跨段），op 只允许 调色盘op 或 0xFF 全量 */
+      img2bin_qoi_emit_run(output, &output_size, &run);
+      if (!img2bin_qoi_index_list_append(index_list, output_size)) {
+        free(output);
+        img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding indexed QOI image.");
+        return 0;
+      }
+      palette_slot = img2bin_indexqoi_palette_find(palette, img2bin_indexqoi_color_key(&current));
+      if (palette_slot >= 0) {
+        output[output_size++] = (unsigned char)palette_slot;
+      } else {
+        output[output_size++] = IMG2BIN_QOI_OP_RGBA;
+        memcpy(output + output_size, current.full, current.full_size);
+        output_size += current.full_size;
+      }
+      previous = current;
+      continue;
+    }
+
+    if (img2bin_qoi_pixels_equal(&current, &previous)) {
+      ++run;
+      if (run == IMG2BIN_QOI_RUN_MAX || pixel_index + 1u == pixel_count) {
+        img2bin_qoi_emit_run(output, &output_size, &run);
+      }
+      continue;
+    }
+
+    img2bin_qoi_emit_run(output, &output_size, &run);
+
+    palette_slot = img2bin_indexqoi_palette_find(palette, img2bin_indexqoi_color_key(&current));
+    if (palette_slot >= 0) {
+      /* 盘命中出单字节 op，不区分透明度是否变化 */
+      output[output_size++] = (unsigned char)palette_slot;
+    } else if (current.a == previous.a && img2bin_qoi_can_emit_diff(&current, &previous)) {
+      int dr = (int)current.r - (int)previous.r;
+      int dg = (int)current.g - (int)previous.g;
+      int db = (int)current.b - (int)previous.b;
+
+      output[output_size++] = (unsigned char)(
+        IMG2BIN_QOI_OP_DIFF |
+        (unsigned char)((dr + 2) << 4) |
+        (unsigned char)((dg + 2) << 2) |
+        (unsigned char)(db + 2));
+    } else if (current.a == previous.a && img2bin_qoi_can_emit_luma(&current, &previous)) {
+      int dr = (int)current.r - (int)previous.r;
+      int dg = (int)current.g - (int)previous.g;
+      int db = (int)current.b - (int)previous.b;
+      int dr_dg = dr - dg;
+      int db_dg = db - dg;
+
+      output[output_size++] = (unsigned char)(IMG2BIN_QOI_OP_LUMA | (unsigned char)(dg + 32));
+      output[output_size++] = (unsigned char)(((dr_dg + 8) << 4) | (db_dg + 8));
+    } else if (current.a == previous.a && spec.has_alpha && current.supports_rgb_chunk) {
+      /* V2 的 0xFE 只用于 ARGB8888/ARGB8565：透明度沿用前像素 */
+      output[output_size++] = IMG2BIN_QOI_OP_RGB;
+      memcpy(output + output_size, current.rgb, current.rgb_size);
+      output_size += current.rgb_size;
+    } else {
+      output[output_size++] = IMG2BIN_QOI_OP_RGBA;
+      memcpy(output + output_size, current.full, current.full_size);
+      output_size += current.full_size;
+    }
+
+    previous = current;
+  }
+
+  output[output_size++] = IMG2BIN_INDEXQOI_END_MARKER_0;
+  output[output_size++] = IMG2BIN_INDEXQOI_END_MARKER_1;
+
+  *out_stream = output;
+  *out_stream_size = output_size;
+  return 1;
 }
 
 int img2bin_encode_indexqoi_image(
@@ -648,10 +987,15 @@ int img2bin_encode_indexqoi_image(
   char *error_buffer,
   size_t error_buffer_size)
 {
+  img2bin_qoi_format_spec_t spec;
+  img2bin_indexqoi_stat_map_t stat_map;
+  img2bin_indexqoi_palette_t palette;
   img2bin_qoi_index_list_t index_list;
+  const img2bin_format_info_t *info = NULL;
   unsigned int effective_interval = 0u;
   unsigned char *payload = NULL;
   size_t payload_size = 0u;
+  size_t palette_bytes = 0u;
   size_t u16_bytes = 0u;
   size_t u24_bytes = 0u;
   size_t u32_bytes = 0u;
@@ -681,16 +1025,43 @@ int img2bin_encode_indexqoi_image(
     return 0;
   }
 
+  info = img2bin_get_format_info(format);
+  if (info == NULL || !img2bin_qoi_get_format_spec(format, &spec)) {
+    img2bin_set_error(error_buffer, error_buffer_size, "Unsupported indexed QOI format.");
+    return 0;
+  }
+
+  stat_map.capacity = 1024u;
+  stat_map.used = 0u;
+  stat_map.slots = (img2bin_indexqoi_stat_t *)calloc(stat_map.capacity, sizeof(*stat_map.slots));
+  if (stat_map.slots == NULL) {
+    img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding indexed QOI image.");
+    return 0;
+  }
+
+  if (!img2bin_indexqoi_collect_stats(format, endianness, background, image, effective_interval, &spec, &stat_map)) {
+    free(stat_map.slots);
+    img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding indexed QOI image.");
+    return 0;
+  }
+
+  if (!img2bin_indexqoi_build_palette(&stat_map, format, endianness, info->bytes_per_pixel, &palette)) {
+    free(stat_map.slots);
+    img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding indexed QOI image.");
+    return 0;
+  }
+  free(stat_map.slots);
+  stat_map.slots = NULL;
+
   img2bin_qoi_index_list_init(&index_list);
-  if (!img2bin_encode_qoi_payload(
+  if (!img2bin_encode_indexqoi_stream(
         format,
         endianness,
         background,
         image,
-        0,
         effective_interval,
+        &palette,
         &index_list,
-        "indexed QOI",
         &payload,
         &payload_size,
         error_buffer,
@@ -741,14 +1112,15 @@ int img2bin_encode_indexqoi_image(
     return 0;
   }
 
-  if (payload_size > SIZE_MAX - (13u + u16_bytes + u24_bytes + u32_bytes)) {
+  palette_bytes = palette.count * info->bytes_per_pixel;
+  if (payload_size > SIZE_MAX - (IMG2BIN_INDEXQOI_HEADER_SIZE + u16_bytes + u24_bytes + u32_bytes + palette_bytes)) {
     free(payload);
     img2bin_qoi_index_list_free(&index_list);
     img2bin_set_error(error_buffer, error_buffer_size, "Indexed QOI output would be too large.");
     return 0;
   }
 
-  total_size = 13u + u16_bytes + u24_bytes + u32_bytes + payload_size;
+  total_size = IMG2BIN_INDEXQOI_HEADER_SIZE + u16_bytes + u24_bytes + u32_bytes + palette_bytes + payload_size;
   output = (unsigned char *)malloc(total_size > 0u ? total_size : 1u);
   if (output == NULL) {
     free(payload);
@@ -757,15 +1129,16 @@ int img2bin_encode_indexqoi_image(
     return 0;
   }
 
-  output[0] = 0x0Du;
+  output[0] = (unsigned char)IMG2BIN_INDEXQOI_HEADER_SIZE;
   img2bin_qoi_write_u16((uint16_t)image->width, IMG2BIN_ENDIAN_BIG, &output[1]);
   img2bin_qoi_write_u16((uint16_t)image->height, IMG2BIN_ENDIAN_BIG, &output[3]);
   img2bin_qoi_write_u16((uint16_t)effective_interval, IMG2BIN_ENDIAN_BIG, &output[5]);
   img2bin_qoi_write_u16((uint16_t)u16_bytes, IMG2BIN_ENDIAN_BIG, &output[7]);
   img2bin_qoi_write_u16((uint16_t)u24_bytes, IMG2BIN_ENDIAN_BIG, &output[9]);
   img2bin_qoi_write_u16((uint16_t)u32_bytes, IMG2BIN_ENDIAN_BIG, &output[11]);
+  output[13] = (unsigned char)palette.count;
 
-  cursor = output + 13u;
+  cursor = output + IMG2BIN_INDEXQOI_HEADER_SIZE;
   for (index = 0u; index < index_list.count; ++index) {
     size_t offset = index_list.offsets[index];
     if (offset <= 0xFFFFu) {
@@ -786,6 +1159,11 @@ int img2bin_encode_indexqoi_image(
       img2bin_qoi_write_u32_be(offset, cursor);
       cursor += 4u;
     }
+  }
+
+  for (index = 0u; index < palette.count; ++index) {
+    memcpy(cursor, palette.pixels[index].full, palette.pixels[index].full_size);
+    cursor += palette.pixels[index].full_size;
   }
 
   memcpy(cursor, payload, payload_size);

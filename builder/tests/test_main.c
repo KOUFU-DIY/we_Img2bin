@@ -1001,6 +1001,8 @@ static void test_qoif_reference_sample(void)
 
 static void test_indexqoi_header_and_offsets(void)
 {
+  /* V2：4 色各出现一次，收益都是 pix_size(3)，不满足 “净收益 > pix_size”，
+     因此调色盘为空（条目数 0），段首/全量一律 0xFF，流尾 0xA0 0x88。 */
   unsigned char pixels[] = {
     0xFF, 0x00, 0x00, 0xFF,
     0x00, 0xFF, 0x00, 0xFF,
@@ -1013,12 +1015,13 @@ static void test_indexqoi_header_and_offsets(void)
   img2bin_image_t image;
   img2bin_rgb_t background = { 0, 0, 0 };
   const unsigned char expected[] = {
-    0x0D, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+    0x0E, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x08,
-    0xFE, 0xFF, 0x00, 0x00,
-    0xFE, 0x00, 0xFF, 0x00,
-    0xFE, 0x00, 0x00, 0xFF,
-    0xFE, 0xFF, 0xFF, 0xFF
+    0xFF, 0xFF, 0x00, 0x00,
+    0xFF, 0x00, 0xFF, 0x00,
+    0xFF, 0x00, 0x00, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF,
+    0xA0, 0x88
   };
 
   memset(&image, 0, sizeof(image));
@@ -1030,7 +1033,99 @@ static void test_indexqoi_header_and_offsets(void)
     img2bin_encode_indexqoi_image(IMG2BIN_FMT_RGB888, IMG2BIN_ENDIAN_BIG, background, &image, 2u, &encoded, &encoded_size, error, sizeof(error)),
     error);
   TEST_ASSERT(encoded_size == sizeof(expected), "IndexQOI header test size mismatch.");
-  test_expect_bytes(encoded, expected, sizeof(expected), "IndexQOI header and offsets");
+  test_expect_bytes(encoded, expected, sizeof(expected), "IndexQOI V2 header and offsets");
+  free(encoded);
+}
+
+static void test_indexqoi_v2_palette_golden_rgb565(void)
+{
+  /* 两遍法选盘黄金样例：红出现 3 次(省6)、蓝 2 次(省4)进盘（阈值 >2），
+     (1,1,1) 只省 2 不进盘；覆盖 调色盘op/0xFF全量/RUN/DIFF/LUMA/结尾标志。 */
+  unsigned char pixels[] = {
+    255, 0, 0, 255,
+    0, 0, 255, 255,
+    255, 0, 0, 255,
+    0, 0, 255, 255,
+    255, 0, 0, 255,
+    8, 4, 8, 255,
+    8, 4, 8, 255,
+    16, 8, 16, 255,
+    41, 12, 24, 255
+  };
+  unsigned char *encoded = NULL;
+  size_t encoded_size = 0;
+  char error[256];
+  img2bin_image_t image;
+  img2bin_rgb_t background = { 0, 0, 0 };
+  const unsigned char expected[] = {
+    /* 14 字节索引头：0x0E, 宽9, 高1, 间隔9, u16=2, u24=0, u32=0, 调色盘2项 */
+    0x0E, 0x00, 0x09, 0x00, 0x01, 0x00, 0x09, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+    /* u16 索引：段首偏移 0 */
+    0x00, 0x00,
+    /* 调色盘：红 0xF800、蓝 0x001F（RGB565 大端） */
+    0xF8, 0x00, 0x00, 0x1F,
+    /* 数据流：盘0 盘1 盘0 盘1 盘0 FF(1,1,1) RUN1 DIFF(+1,+1,+1) LUMA(dg=1,dr-dg=2,db-dg=0) */
+    0x00, 0x01, 0x00, 0x01, 0x00, 0xFF, 0x08, 0x21, 0xC0, 0x7F, 0xA1, 0xA8,
+    0xA0, 0x88
+  };
+
+  memset(&image, 0, sizeof(image));
+  image.width = 9;
+  image.height = 1;
+  image.pixels = pixels;
+
+  TEST_ASSERT(
+    img2bin_encode_indexqoi_image(IMG2BIN_FMT_RGB565, IMG2BIN_ENDIAN_BIG, background, &image, 0u, &encoded, &encoded_size, error, sizeof(error)),
+    error);
+  TEST_ASSERT(encoded_size == sizeof(expected), "IndexQOI V2 RGB565 palette golden size mismatch.");
+  test_expect_bytes(encoded, expected, sizeof(expected), "IndexQOI V2 RGB565 palette golden");
+  free(encoded);
+}
+
+static void test_indexqoi_v2_palette_golden_argb8888(void)
+{
+  /* 覆盖：透明度变化像素命中调色盘出单字节 op、段首盘命中、0xFE 剥透明度
+     全量（仅 ARGB8888/8565）、按收益降序选盘（12/8/6）。 */
+  unsigned char pixels[] = {
+    10, 20, 30, 255,
+    10, 20, 30, 128,
+    10, 20, 30, 255,
+    200, 100, 50, 255,
+    10, 20, 30, 128,
+    10, 20, 30, 255,
+    100, 200, 50, 255,
+    200, 100, 50, 255
+  };
+  unsigned char *encoded = NULL;
+  size_t encoded_size = 0;
+  char error[256];
+  img2bin_image_t image;
+  img2bin_rgb_t background = { 0, 0, 0 };
+  const unsigned char expected[] = {
+    /* 14 字节索引头：0x0E, 宽4, 高2, 间隔4, u16=4, u24=0, u32=0, 调色盘3项 */
+    0x0E, 0x00, 0x04, 0x00, 0x02, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x03,
+    /* u16 索引：两个段首偏移 0 与 4 */
+    0x00, 0x00, 0x00, 0x04,
+    /* 调色盘（ARGB8888 大端 A,R,G,B）：省12 的 (10,20,30,255)、省8 的
+       (10,20,30,128)、省6 的 (200,100,50,255) */
+    0xFF, 0x0A, 0x14, 0x1E,
+    0x80, 0x0A, 0x14, 0x1E,
+    0xFF, 0xC8, 0x64, 0x32,
+    /* 数据流：盘0 盘1(透明度变化也命中) 盘0 盘2 | 段首盘1 盘0 FE(100,200,50) 盘2 */
+    0x00, 0x01, 0x00, 0x02, 0x01, 0x00, 0xFE, 0x64, 0xC8, 0x32, 0x02,
+    0xA0, 0x88
+  };
+
+  memset(&image, 0, sizeof(image));
+  image.width = 4;
+  image.height = 2;
+  image.pixels = pixels;
+
+  TEST_ASSERT(
+    img2bin_encode_indexqoi_image(IMG2BIN_FMT_ARGB8888, IMG2BIN_ENDIAN_BIG, background, &image, 0u, &encoded, &encoded_size, error, sizeof(error)),
+    error);
+  TEST_ASSERT(encoded_size == sizeof(expected), "IndexQOI V2 ARGB8888 palette golden size mismatch.");
+  test_expect_bytes(encoded, expected, sizeof(expected), "IndexQOI V2 ARGB8888 palette golden");
   free(encoded);
 }
 
@@ -1054,19 +1149,23 @@ static void test_indexqoi_default_interval_uses_image_width(void)
   TEST_ASSERT(
     img2bin_encode_indexqoi_image(IMG2BIN_FMT_ARGB8888, IMG2BIN_ENDIAN_BIG, background, &image, 0u, &encoded, &encoded_size, error, sizeof(error)),
     error);
-  TEST_ASSERT(encoded_size >= 15u, "IndexQOI default-interval output is missing the header or index bytes.");
-  TEST_ASSERT(encoded[0] == 0x0D, "IndexQOI default-interval header length mismatch.");
+  TEST_ASSERT(encoded_size >= 16u, "IndexQOI default-interval output is missing the header or index bytes.");
+  TEST_ASSERT(encoded[0] == 0x0E, "IndexQOI default-interval header length mismatch.");
   TEST_ASSERT(encoded[1] == 0x00 && encoded[2] == 0x24, "IndexQOI default width mismatch.");
   TEST_ASSERT(encoded[3] == 0x00 && encoded[4] == 0x2D, "IndexQOI default height mismatch.");
   TEST_ASSERT(encoded[5] == 0x00 && encoded[6] == 0x24, "IndexQOI default interval should match image width.");
   TEST_ASSERT(encoded[7] == 0x00 && encoded[8] > 0x00, "IndexQOI should emit at least one u16 index entry.");
-  TEST_ASSERT(encoded[13] == 0x00 && encoded[14] == 0x00, "IndexQOI first index should point at payload offset 0.");
+  TEST_ASSERT(encoded[13] <= 64u, "IndexQOI palette count must stay within 0..64.");
+  TEST_ASSERT(encoded[14] == 0x00 && encoded[15] == 0x00, "IndexQOI first index should point at stream offset 0.");
   u16_bytes = ((size_t)encoded[7] << 8) | encoded[8];
   u24_bytes = ((size_t)encoded[9] << 8) | encoded[10];
   u32_bytes = ((size_t)encoded[11] << 8) | encoded[12];
-  payload_position = 13u + u16_bytes + u24_bytes + u32_bytes;
-  TEST_ASSERT(payload_position < encoded_size, "IndexQOI payload position exceeds output size.");
-  TEST_ASSERT(encoded[payload_position] == 0xFF, "IndexQOI payload should start with a raw chunk at the first index position.");
+  payload_position = 14u + u16_bytes + u24_bytes + u32_bytes + (size_t)encoded[13] * 4u;
+  TEST_ASSERT(payload_position < encoded_size, "IndexQOI stream position exceeds output size.");
+  TEST_ASSERT(encoded[payload_position] < encoded[13] || encoded[payload_position] == 0xFF,
+    "IndexQOI stream should start with a palette op or a raw 0xFF chunk at the first index position.");
+  TEST_ASSERT(encoded[encoded_size - 2u] == 0xA0 && encoded[encoded_size - 1u] == 0x88,
+    "IndexQOI stream must end with the 0xA0 0x88 marker.");
 
   img2bin_free_image(&image);
   free(encoded);
@@ -2364,7 +2463,8 @@ static void test_decoder_rejects_damage(void)
   img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
   const unsigned char lone_index_op[1] = { 0x00 };
   const unsigned char underflow_diff_op[1] = { 0x40 };
-  unsigned char bad_header[13] = { 0x0C, 0, 1, 0, 1, 0, 1, 0, 2, 0, 0, 0, 0 };
+  unsigned char v1_header[14] = { 0x0D, 0, 1, 0, 1, 0, 1, 0, 2, 0, 0, 0, 0, 0 };
+  unsigned char overfull_palette_header[14] = { 0x0E, 0, 1, 0, 1, 0, 1, 0, 2, 0, 0, 0, 0, 65 };
   size_t index = 0;
 
   for (index = 0; index < 4; ++index) {
@@ -2410,8 +2510,32 @@ static void test_decoder_rejects_damage(void)
 
   {
     img2bin_indexqoi_header_t header;
-    status = img2bin_decode_indexqoi_header(bad_header, sizeof(bad_header), &header);
-    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "indexQOI header with a wrong length byte must be rejected.");
+
+    status = img2bin_decode_indexqoi_header(v1_header, sizeof(v1_header), &header);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "indexQOI V1 (0x0D) header must be rejected as unsupported.");
+    status = img2bin_decode_indexqoi_header(overfull_palette_header, sizeof(overfull_palette_header), &header);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "indexQOI palette count above 64 must be rejected.");
+
+    TEST_ASSERT(img2bin_encode_indexqoi_image(IMG2BIN_FMT_RGB565, IMG2BIN_ENDIAN_BIG, background, &image, 0u, &encoded, &encoded_size, error, sizeof(error)), error);
+    TEST_ASSERT(encoded_size <= sizeof(tampered), "indexQOI damage fixture is unexpectedly large.");
+    status = img2bin_decode_indexqoi_header(encoded, encoded_size, &header);
+    TEST_ASSERT(status == IMG2BIN_DECODE_OK, "indexQOI damage fixture header parse failed.");
+    TEST_ASSERT(header.palette_count == 0u, "indexQOI damage fixture should have an empty palette.");
+
+    memcpy(tampered, encoded, encoded_size);
+    tampered[encoded_size - 1u] = 0x00; /* 破坏 0xA0 0x88 结尾标志 */
+    status = img2bin_decode_indexqoi(tampered, encoded_size, IMG2BIN_DECODE_FMT_RGB565, IMG2BIN_DECODE_BIG_ENDIAN, decoded, sizeof(decoded), &decoded_size);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "indexQOI without the 0xA0 0x88 end marker must be rejected.");
+
+    status = img2bin_decode_indexqoi(encoded, encoded_size - 1u, IMG2BIN_DECODE_FMT_RGB565, IMG2BIN_DECODE_BIG_ENDIAN, decoded, sizeof(decoded), &decoded_size);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_TRUNCATED, "Truncated indexQOI stream must be rejected.");
+
+    memcpy(tampered, encoded, encoded_size);
+    tampered[header.palette_offset] = 0x00; /* 空调色盘却出现 0x00~0x3F 区 op */
+    status = img2bin_decode_indexqoi(tampered, encoded_size, IMG2BIN_DECODE_FMT_RGB565, IMG2BIN_DECODE_BIG_ENDIAN, decoded, sizeof(decoded), &decoded_size);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "Palette op beyond the palette count must be rejected.");
+    free(encoded);
+    encoded = NULL;
   }
 }
 
@@ -2494,6 +2618,8 @@ int main(void)
   test_qoif_omits_index_chunks();
   test_qoif_reference_sample();
   test_indexqoi_header_and_offsets();
+  test_indexqoi_v2_palette_golden_rgb565();
+  test_indexqoi_v2_palette_golden_argb8888();
   test_indexqoi_default_interval_uses_image_width();
   test_image_loading_for_png_bmp_jpg();
   test_info_json();

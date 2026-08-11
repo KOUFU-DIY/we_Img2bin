@@ -47,7 +47,7 @@ img2c/
 
 [builder/src/decoder/](builder/src/decoder/) 提供纯 C99、零依赖、不用动态内存的参考解码器
 `img2bin_decode.c/.h`（发布包里在 `decoder\` 目录），覆盖全部六种算法 × 九种彩色像素格式 × 大小端，
-外加 Alpha 蒙版格式（`A8/A4/A2/A1`，仅 raw 算法）与 indexQOI 跳转解码接口。
+外加 Alpha 蒙版格式（`A8/A4/A2/A1`，仅 raw 算法）与 indexQOI V2（静态调色盘）跳转解码接口。
 测试套件对每种组合做"编码 → 解码 → 与 RAW 逐字节比对"回环验证。
 
 ## 当前支持

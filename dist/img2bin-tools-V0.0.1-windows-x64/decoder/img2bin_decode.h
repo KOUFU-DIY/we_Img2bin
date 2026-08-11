@@ -8,7 +8,8 @@
  *   - 文件级接口（推荐）：img2bin_decode_header / img2bin_decode_image /
  *     img2bin_decode_image_from_slot，输入整个 .bin 文件，按头自动分发。
  *   - payload 级接口：img2bin_decode_raw/rle/imprle/qoi/qoif/indexqoi*，
- *     输入去掉 6 字节通用头后的裸流（indexQOI 裸流自带 13 字节结构头）；
+ *     输入去掉 6 字节通用头后的裸流（indexQOI V2 裸流自带 14 字节索引头，
+ *     后随 u16/u24/u32 索引区、静态调色盘与 QOI 数据流，流尾为 0xA0 0x88）；
  *     Alpha 蒙版格式（A8/A4/A2/A1，仅 raw 算法）走 img2bin_decode_raw_alpha。
  *
  * 所有解码输出都是 RAW 打包像素字节流（不含任何头），与
@@ -83,6 +84,10 @@ typedef struct img2bin_decode_header_s {
   uint16_t height;
 } img2bin_decode_header_t;
 
+/* indexQOI V2（静态调色盘）索引头，14 字节（[0]=0x0E 兼作版本标识，V1 的
+   0x0D 会被判为损坏流）。调色盘紧跟三个索引区之后，每项一个完整原始格式
+   像素（含 Alpha，字节序同 0xFF 全量像素）；QOI 数据流起点 =
+   palette_offset + palette_count × bytes_per_pixel，流尾以 0xA0 0x88 结束。 */
 typedef struct img2bin_indexqoi_header_s {
   uint16_t width;
   uint16_t height;
@@ -90,8 +95,9 @@ typedef struct img2bin_indexqoi_header_s {
   uint16_t u16_bytes;
   uint16_t u24_bytes;
   uint16_t u32_bytes;
+  uint8_t palette_count; /* 0..64，0 = 无调色盘 */
   size_t slot_count;
-  size_t payload_offset;
+  size_t palette_offset; /* = 14 + u16_bytes + u24_bytes + u32_bytes */
 } img2bin_indexqoi_header_t;
 
 /* 整字节格式返回每像素字节数；亚字节的 Alpha 蒙版（A4/A2/A1）返回 0。 */
