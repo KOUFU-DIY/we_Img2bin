@@ -618,7 +618,7 @@ int img2bin_encode_qoif_image(
 /* =====================  indexQOI V2（静态调色盘）  =====================
  *
  * payload 布局：
- *   [14字节索引头][u16索引区][u24索引区][u32索引区][调色盘][QOI数据流][0xA0 0x88]
+ *   [14字节索引头][u16索引区][u24索引区][u32索引区][调色盘][QOI数据流]
  * 索引头（恒大端）：
  *   [0] 头长度 0x0E（同时是版本标识；V1 为 0x0D）
  *   [1..2] 宽  [3..4] 高  [5..6] 像素索引间隔
@@ -635,8 +635,6 @@ int img2bin_encode_qoif_image(
 
 #define IMG2BIN_INDEXQOI_HEADER_SIZE 14u
 #define IMG2BIN_INDEXQOI_PALETTE_MAX 64u
-#define IMG2BIN_INDEXQOI_END_MARKER_0 0xA0u
-#define IMG2BIN_INDEXQOI_END_MARKER_1 0x88u
 
 typedef struct img2bin_indexqoi_stat_s {
   uint32_t key;
@@ -853,7 +851,7 @@ static int img2bin_indexqoi_build_palette(
   return 1;
 }
 
-/* 第二遍：带调色盘正式编码 QOI 数据流（含 0xA0 0x88 结尾标志），并记录索引点偏移。 */
+/* 第二遍：带调色盘正式编码 QOI 数据流，并记录索引点偏移。 */
 static int img2bin_encode_indexqoi_stream(
   img2bin_pixel_format_t format,
   img2bin_endianness_t endianness,
@@ -877,11 +875,11 @@ static int img2bin_encode_indexqoi_stream(
 
   img2bin_qoi_get_format_spec(format, &spec);
 
-  if (pixel_count > (SIZE_MAX - 2u) / 5u) {
+  if (pixel_count > SIZE_MAX / 5u) {
     img2bin_set_error(error_buffer, error_buffer_size, "Indexed QOI output would be too large.");
     return 0;
   }
-  output = (unsigned char *)malloc(pixel_count * 5u + 2u);
+  output = (unsigned char *)malloc(pixel_count * 5u);
   if (output == NULL) {
     img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding indexed QOI image.");
     return 0;
@@ -967,9 +965,6 @@ static int img2bin_encode_indexqoi_stream(
 
     previous = current;
   }
-
-  output[output_size++] = IMG2BIN_INDEXQOI_END_MARKER_0;
-  output[output_size++] = IMG2BIN_INDEXQOI_END_MARKER_1;
 
   *out_stream = output;
   *out_stream_size = output_size;

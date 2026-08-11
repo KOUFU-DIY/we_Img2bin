@@ -606,7 +606,6 @@ static img2bin_decode_status_t img2bin_decode_qoi_stream(
   int allow_index,
   const uint8_t *palette,   /* indexQOI V2 静态调色盘起点；qoi/qoif 传 0 */
   uint8_t palette_count,    /* 0..64；op < palette_count 时查盘 */
-  int expect_end_marker,    /* indexQOI V2：解码完成后流尾必须是 0xA0 0x88 */
   uint8_t *output,
   size_t output_capacity,
   size_t *out_written)
@@ -745,15 +744,6 @@ static img2bin_decode_status_t img2bin_decode_qoi_stream(
     }
   }
 
-  if (expect_end_marker) {
-    if (input_size - cursor < 2u) {
-      return IMG2BIN_DECODE_ERR_TRUNCATED;
-    }
-    if (input[cursor] != 0xA0u || input[cursor + 1u] != 0x88u) {
-      return IMG2BIN_DECODE_ERR_CORRUPT;
-    }
-    cursor += 2u;
-  }
   if (cursor != input_size) {
     return IMG2BIN_DECODE_ERR_TRAILING_DATA;
   }
@@ -772,7 +762,7 @@ img2bin_decode_status_t img2bin_decode_qoi(
   size_t output_capacity,
   size_t *out_written)
 {
-  return img2bin_decode_qoi_stream(input, input_size, format, endianness, pixel_count, 1, 0, 0u, 0, output, output_capacity, out_written);
+  return img2bin_decode_qoi_stream(input, input_size, format, endianness, pixel_count, 1, 0, 0u, output, output_capacity, out_written);
 }
 
 img2bin_decode_status_t img2bin_decode_qoif(
@@ -785,7 +775,7 @@ img2bin_decode_status_t img2bin_decode_qoif(
   size_t output_capacity,
   size_t *out_written)
 {
-  return img2bin_decode_qoi_stream(input, input_size, format, endianness, pixel_count, 0, 0, 0u, 0, output, output_capacity, out_written);
+  return img2bin_decode_qoi_stream(input, input_size, format, endianness, pixel_count, 0, 0, 0u, output, output_capacity, out_written);
 }
 
 static int img2bin_decode_format_from_nibble(uint8_t nibble, img2bin_decode_format_t *out_format)
@@ -1104,7 +1094,6 @@ img2bin_decode_status_t img2bin_decode_indexqoi(
     0,
     input + header.palette_offset,
     header.palette_count,
-    1,
     output,
     output_capacity,
     out_written);
@@ -1161,7 +1150,6 @@ img2bin_decode_status_t img2bin_decode_indexqoi_from_slot(
     0,
     input + header.palette_offset,
     header.palette_count,
-    1,
     output,
     output_capacity,
     out_written);

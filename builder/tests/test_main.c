@@ -1002,7 +1002,7 @@ static void test_qoif_reference_sample(void)
 static void test_indexqoi_header_and_offsets(void)
 {
   /* V2：4 色各出现一次，收益都是 pix_size(3)，不满足 “净收益 > pix_size”，
-     因此调色盘为空（条目数 0），段首/全量一律 0xFF，流尾 0xA0 0x88。 */
+     因此调色盘为空（条目数 0），段首/全量一律 0xFF，无尾部结束码。 */
   unsigned char pixels[] = {
     0xFF, 0x00, 0x00, 0xFF,
     0x00, 0xFF, 0x00, 0xFF,
@@ -1020,8 +1020,7 @@ static void test_indexqoi_header_and_offsets(void)
     0xFF, 0xFF, 0x00, 0x00,
     0xFF, 0x00, 0xFF, 0x00,
     0xFF, 0x00, 0x00, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF,
-    0xA0, 0x88
+    0xFF, 0xFF, 0xFF, 0xFF
   };
 
   memset(&image, 0, sizeof(image));
@@ -1065,8 +1064,7 @@ static void test_indexqoi_v2_palette_golden_rgb565(void)
     /* 调色盘：红 0xF800、蓝 0x001F（RGB565 大端） */
     0xF8, 0x00, 0x00, 0x1F,
     /* 数据流：盘0 盘1 盘0 盘1 盘0 FF(1,1,1) RUN1 DIFF(+1,+1,+1) LUMA(dg=1,dr-dg=2,db-dg=0) */
-    0x00, 0x01, 0x00, 0x01, 0x00, 0xFF, 0x08, 0x21, 0xC0, 0x7F, 0xA1, 0xA8,
-    0xA0, 0x88
+    0x00, 0x01, 0x00, 0x01, 0x00, 0xFF, 0x08, 0x21, 0xC0, 0x7F, 0xA1, 0xA8
   };
 
   memset(&image, 0, sizeof(image));
@@ -1112,8 +1110,7 @@ static void test_indexqoi_v2_palette_golden_argb8888(void)
     0x80, 0x0A, 0x14, 0x1E,
     0xFF, 0xC8, 0x64, 0x32,
     /* 数据流：盘0 盘1(透明度变化也命中) 盘0 盘2 | 段首盘1 盘0 FE(100,200,50) 盘2 */
-    0x00, 0x01, 0x00, 0x02, 0x01, 0x00, 0xFE, 0x64, 0xC8, 0x32, 0x02,
-    0xA0, 0x88
+    0x00, 0x01, 0x00, 0x02, 0x01, 0x00, 0xFE, 0x64, 0xC8, 0x32, 0x02
   };
 
   memset(&image, 0, sizeof(image));
@@ -1164,8 +1161,6 @@ static void test_indexqoi_default_interval_uses_image_width(void)
   TEST_ASSERT(payload_position < encoded_size, "IndexQOI stream position exceeds output size.");
   TEST_ASSERT(encoded[payload_position] < encoded[13] || encoded[payload_position] == 0xFF,
     "IndexQOI stream should start with a palette op or a raw 0xFF chunk at the first index position.");
-  TEST_ASSERT(encoded[encoded_size - 2u] == 0xA0 && encoded[encoded_size - 1u] == 0x88,
-    "IndexQOI stream must end with the 0xA0 0x88 marker.");
 
   img2bin_free_image(&image);
   free(encoded);
@@ -2528,15 +2523,15 @@ static void test_decoder_rejects_damage(void)
     TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "indexQOI palette count above 64 must be rejected.");
 
     TEST_ASSERT(img2bin_encode_indexqoi_image(IMG2BIN_FMT_RGB565, IMG2BIN_ENDIAN_BIG, background, &image, 0u, &encoded, &encoded_size, error, sizeof(error)), error);
-    TEST_ASSERT(encoded_size <= sizeof(tampered), "indexQOI damage fixture is unexpectedly large.");
+    TEST_ASSERT(encoded_size + 1u <= sizeof(tampered), "indexQOI damage fixture is unexpectedly large.");
     status = img2bin_decode_indexqoi_header(encoded, encoded_size, &header);
     TEST_ASSERT(status == IMG2BIN_DECODE_OK, "indexQOI damage fixture header parse failed.");
     TEST_ASSERT(header.palette_count == 0u, "indexQOI damage fixture should have an empty palette.");
 
     memcpy(tampered, encoded, encoded_size);
-    tampered[encoded_size - 1u] = 0x00; /* 破坏 0xA0 0x88 结尾标志 */
-    status = img2bin_decode_indexqoi(tampered, encoded_size, IMG2BIN_DECODE_FMT_RGB565, IMG2BIN_DECODE_BIG_ENDIAN, decoded, sizeof(decoded), &decoded_size);
-    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "indexQOI without the 0xA0 0x88 end marker must be rejected.");
+    tampered[encoded_size] = 0x55; /* 数据流之后的多余字节 */
+    status = img2bin_decode_indexqoi(tampered, encoded_size + 1u, IMG2BIN_DECODE_FMT_RGB565, IMG2BIN_DECODE_BIG_ENDIAN, decoded, sizeof(decoded), &decoded_size);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_TRAILING_DATA, "Trailing bytes after the indexQOI stream must be rejected.");
 
     status = img2bin_decode_indexqoi(encoded, encoded_size - 1u, IMG2BIN_DECODE_FMT_RGB565, IMG2BIN_DECODE_BIG_ENDIAN, decoded, sizeof(decoded), &decoded_size);
     TEST_ASSERT(status == IMG2BIN_DECODE_ERR_TRUNCATED, "Truncated indexQOI stream must be rejected.");
