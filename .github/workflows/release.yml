@@ -31,8 +31,17 @@ jobs:
           "semver=$semver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "版本: $text ($semver)"
 
+      # 不锁定生成器版本：由 CMake 自动选用 runner 上已安装的最新 Visual Studio，
+      # 避免镜像升级 VS 版本后写死的生成器名失效。
+      - name: 环境信息
+        shell: pwsh
+        run: |
+          cmake --version
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) { & $vswhere -latest -products * -property displayName, installationVersion }
+
       - name: 配置
-        run: cmake -S builder -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S builder -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: 构建
         run: cmake --build build --config Release
@@ -49,8 +58,11 @@ jobs:
           $root = "package/$name"
           New-Item -ItemType Directory -Force -Path "$root/windows/tools", "$root/docs/user", "$root/decoder" | Out-Null
 
+          # 多配置生成器(VS)产物在 bin/Release，单配置生成器(Ninja/Make)在 bin
+          $binDir = if (Test-Path 'build/bin/Release') { 'build/bin/Release' } else { 'build/bin' }
+          Write-Host "产物目录: $binDir"
           foreach ($tool in 'raw', 'imprle', 'rle', 'qoi', 'qoif', 'indexqoi') {
-            $exe = "build/bin/Release/img2bin_$tool.exe"
+            $exe = "$binDir/img2bin_$tool.exe"
             if (!(Test-Path $exe)) { throw "构建产物缺失: $exe" }
             Copy-Item $exe "$root/windows/tools/"
           }
