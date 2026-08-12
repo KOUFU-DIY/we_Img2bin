@@ -193,9 +193,23 @@ jobs:
 
           每个包内含：可执行文件、C99 参考解码器源码（`decoder/`）、完整用户文档（`docs/user/`，每个工具都有自包含的独立规格说明）。
           EOF
-          gh release create "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "img2bin tools ${GITHUB_REF_NAME}" \
-            --notes-file notes.md \
-            artifacts/windows-package/*.zip \
-            artifacts/macos-package/*.tar.gz
+          # 幂等：同一标签重复触发（例如重写历史后强推标签）时更新已有 Release 而不是报错
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} 已存在，更新说明并覆盖上传资产"
+            gh release edit "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "img2bin tools ${GITHUB_REF_NAME}" \
+              --notes-file notes.md
+            gh release upload "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber \
+              artifacts/windows-package/*.zip \
+              artifacts/macos-package/*.tar.gz
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "img2bin tools ${GITHUB_REF_NAME}" \
+              --notes-file notes.md \
+              artifacts/windows-package/*.zip \
+              artifacts/macos-package/*.tar.gz
+          fi
