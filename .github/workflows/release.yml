@@ -1,0 +1,167 @@
+name: build-and-release
+
+# 推送到 main：编译 + 跑测试（两个平台都跑，用于验证）
+# 推送 v* 标签：编译 + 测试通过后，把 Windows 与 macOS 发布包发到 GitHub Releases
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取版本号（version.h 是唯一来源）
+        id: ver
+        shell: pwsh
+        run: |
+          $header = 'builder/src/core/version.h'
+          $text = (Select-String -Path $header -Pattern '^\s*#define\s+IMG2BIN_VERSION_TEXT\s+"([^"]+)"').Matches[0].Groups[1].Value
+          $semver = (Select-String -Path $header -Pattern '^\s*#define\s+IMG2BIN_VERSION_SEMVER\s+"([^"]+)"').Matches[0].Groups[1].Value
+          "text=$text"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "semver=$semver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "版本: $text ($semver)"
+
+      - name: 配置
+        run: cmake -S builder -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: 构建
+        run: cmake --build build --config Release
+
+      - name: 测试
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.ver.outputs.text }}'
+          $semver = '${{ steps.ver.outputs.semver }}'
+          $name = "img2bin-tools-$ver-windows-x64"
+          $root = "package/$name"
+          New-Item -ItemType Directory -Force -Path "$root/windows/tools", "$root/docs/user", "$root/decoder" | Out-Null
+
+          foreach ($tool in 'raw', 'imprle', 'rle', 'qoi', 'qoif', 'indexqoi') {
+            $exe = "build/bin/Release/img2bin_$tool.exe"
+            if (!(Test-Path $exe)) { throw "构建产物缺失: $exe" }
+            Copy-Item $exe "$root/windows/tools/"
+          }
+          Copy-Item 'docs/user/*' "$root/docs/user/" -Recurse -Force
+          Copy-Item 'builder/src/decoder/img2bin_decode.c' "$root/decoder/"
+          Copy-Item 'builder/src/decoder/img2bin_decode.h' "$root/decoder/"
+
+          (Get-Content 'builder/release/README.template.txt' -Raw -Encoding UTF8).
+            Replace('__VERSION_TEXT__', $ver).
+            Replace('__VERSION_SEMVER__', $semver) |
+            Set-Content "$root/README.txt" -Encoding utf8
+
+          Compress-Archive -Path $root -DestinationPath "$name.zip" -Force
+          Write-Host "已打包 $name.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-package
+          path: img2bin-tools-*-windows-x64.zip
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取版本号（version.h 是唯一来源）
+        id: ver
+        run: |
+          header=builder/src/core/version.h
+          text=$(sed -nE 's/^[[:space:]]*#define[[:space:]]+IMG2BIN_VERSION_TEXT[[:space:]]+"([^"]+)".*/\1/p' "$header")
+          semver=$(sed -nE 's/^[[:space:]]*#define[[:space:]]+IMG2BIN_VERSION_SEMVER[[:space:]]+"([^"]+)".*/\1/p' "$header")
+          echo "text=$text"     >> "$GITHUB_OUTPUT"
+          echo "semver=$semver" >> "$GITHUB_OUTPUT"
+          echo "版本: $text ($semver)"
+
+      # arm64 + x86_64 双架构，一个二进制同时跑在 Apple 芯片和 Intel 机器上
+      - name: 配置
+        run: cmake -S builder -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: 构建
+        run: cmake --build build
+
+      - name: 测试
+        run: ctest --test-dir build --output-on-failure
+
+      - name: 打包
+        run: |
+          ver='${{ steps.ver.outputs.text }}'
+          semver='${{ steps.ver.outputs.semver }}'
+          name="img2bin-tools-$ver-macos-universal"
+          root="package/$name"
+          mkdir -p "$root/macos/tools" "$root/docs/user" "$root/decoder"
+
+          for tool in raw imprle rle qoi qoif indexqoi; do
+            bin="build/bin/img2bin_$tool"
+            test -f "$bin" || { echo "构建产物缺失: $bin"; exit 1; }
+            cp "$bin" "$root/macos/tools/"
+            lipo -info "$bin"
+          done
+          chmod +x "$root/macos/tools/"*
+          cp -R docs/user/. "$root/docs/user/"
+          cp builder/src/decoder/img2bin_decode.c builder/src/decoder/img2bin_decode.h "$root/decoder/"
+
+          sed -e "s/__VERSION_TEXT__/$ver/g" -e "s/__VERSION_SEMVER__/$semver/g" \
+            builder/release/README.macos.template.txt > "$root/README.txt"
+
+          tar -czf "$name.tar.gz" -C package "$name"
+          echo "已打包 $name.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-package
+          path: img2bin-tools-*-macos-universal.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: 发布 Release
+    # 只有推送 v* 标签才发布；推 main 只做编译验证
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 创建 Release 并上传发布包
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls -R artifacts
+          cat > notes.md <<'EOF'
+          img2bin 工具集发布包，六个取模 CLI（raw / imprle / rle / qoi / qoif / indexqoi）。
+
+          | 平台 | 下载 | 说明 |
+          | --- | --- | --- |
+          | Windows x64 | `*-windows-x64.zip` | 解压后双击 `windows\tools` 下任意 exe 即可用 |
+          | macOS universal | `*-macos-universal.tar.gz` | Apple 芯片与 Intel 通用；首次使用先执行 `xattr -dr com.apple.quarantine macos/tools` |
+
+          两个平台输出的 `.bin` 逐字节一致，可混用同一套资源管线。
+
+          每个包内含：可执行文件、C99 参考解码器源码（`decoder/`）、完整用户文档（`docs/user/`，每个工具都有自包含的独立规格说明）。
+          EOF
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "img2bin tools ${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            artifacts/windows-package/*.zip \
+            artifacts/macos-package/*.tar.gz

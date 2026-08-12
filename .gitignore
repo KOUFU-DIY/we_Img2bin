@@ -1,4 +1,4 @@
-# CMake 构建目录
+# ===== 构建目录 =====
 builder/build/
 builder/build-ninja/
 builder/build-workspace/
@@ -9,8 +9,26 @@ builder/gui_tauri/dist/
 builder/gui_tauri/src-tauri/target/
 builder/gui_tauri/*.log
 
-# 工具输出结果（任意层级的 output 目录，如 windows/tools/output）
+# ===== 发布产物 =====
+# 可执行文件与打包目录由 GitHub Actions 编译、经 Releases 分发，不进版本库。
+# 本地 build_release.ps1 仍会照常生成这两个目录，只是不再被跟踪。
+dist/
+windows/tools/
+
+# ===== 工具运行目录 =====
+# 任意层级的 input/output 都是运行时素材与结果，不进版本库
+input/
 output/
 
-# 临时文件
+# ===== 本地开发辅助 =====
+# 面向 AI 助手的仓库内部指引，含本机路径，不对外分发
+CLAUDE.md
+
+# ===== 可选素材 =====
+# 参考样例目录体积大且非必需；缺失时相关测试自动跳过
+参考/
+
+# ===== 临时与系统文件 =====
 *.tmp
+.DS_Store
+Thumbs.db

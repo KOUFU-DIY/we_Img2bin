@@ -686,6 +686,17 @@ static void test_imprle_split_boundaries(void)
   free(encoded);
 }
 
+/* 参考样例目录 参考/取模例子/ 属于可选素材，不随仓库分发（云端 CI 的干净检出上也没有）。
+   缺失时相关测试跳过而不是失败，保证 ctest 在任意干净检出上都能全绿。 */
+static int test_reference_sample_ready(const char *sample_path, const char *test_name)
+{
+  if (img2bin_is_regular_file(sample_path)) {
+    return 1;
+  }
+  printf("TEST SKIP: %s (optional reference sample is absent: %s)\n", test_name, sample_path);
+  return 0;
+}
+
 static void test_imprle_reference_sample(void)
 {
   char image_path[IMG2BIN_PATH_CAPACITY];
@@ -702,6 +713,10 @@ static void test_imprle_reference_sample(void)
   memset(&image, 0, sizeof(image));
   test_join_source_path("参考/取模例子/取模图片.png", image_path, sizeof(image_path));
   test_join_source_path("参考/取模例子/ARGB8888-改进RLE-数组.txt", text_path, sizeof(text_path));
+
+  if (!test_reference_sample_ready(image_path, "imprle reference sample")) {
+    return;
+  }
 
   TEST_ASSERT(img2bin_load_image(image_path, &image, error, sizeof(error)), error);
   text = test_read_text_file(text_path);
@@ -829,6 +844,10 @@ static void test_rle_reference_sample(void)
   test_join_source_path("参考/取模例子/取模图片.png", image_path, sizeof(image_path));
   test_join_source_path("参考/取模例子/ARGB8888-原始RLE-数组.txt", text_path, sizeof(text_path));
 
+  if (!test_reference_sample_ready(image_path, "rle reference sample")) {
+    return;
+  }
+
   TEST_ASSERT(img2bin_load_image(image_path, &image, error, sizeof(error)), error);
   text = test_read_text_file(text_path);
   TEST_ASSERT(text != NULL, "Could not read original-RLE reference text.");
@@ -916,6 +935,10 @@ static void test_qoi_reference_sample(void)
   test_join_source_path("参考/取模例子/取模图片.png", image_path, sizeof(image_path));
   test_join_source_path("参考/取模例子/ARGB8888-原始QOI-数组.txt", text_path, sizeof(text_path));
 
+  if (!test_reference_sample_ready(image_path, "qoi reference sample")) {
+    return;
+  }
+
   TEST_ASSERT(img2bin_load_image(image_path, &image, error, sizeof(error)), error);
   text = test_read_text_file(text_path);
   TEST_ASSERT(text != NULL, "Could not read original-QOI reference text.");
@@ -979,6 +1002,10 @@ static void test_qoif_reference_sample(void)
   memset(&image, 0, sizeof(image));
   test_join_source_path("参考/取模例子/取模图片.png", image_path, sizeof(image_path));
   test_join_source_path("参考/取模例子/ARGB8888-原始QOI(无字典)-数组.txt", text_path, sizeof(text_path));
+
+  if (!test_reference_sample_ready(image_path, "qoif reference sample")) {
+    return;
+  }
 
   TEST_ASSERT(img2bin_load_image(image_path, &image, error, sizeof(error)), error);
   text = test_read_text_file(text_path);
@@ -1141,6 +1168,10 @@ static void test_indexqoi_default_interval_uses_image_width(void)
 
   memset(&image, 0, sizeof(image));
   test_join_source_path("参考/取模例子/取模图片.png", image_path, sizeof(image_path));
+
+  if (!test_reference_sample_ready(image_path, "indexqoi default-interval sample")) {
+    return;
+  }
 
   TEST_ASSERT(img2bin_load_image(image_path, &image, error, sizeof(error)), error);
   TEST_ASSERT(
