@@ -18,7 +18,7 @@ jobs:
     name: Windows x64
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 读取版本号（version.h 是唯一来源）
         id: ver
@@ -33,21 +33,43 @@ jobs:
 
       # 不锁定生成器版本：由 CMake 自动选用 runner 上已安装的最新 Visual Studio，
       # 避免镜像升级 VS 版本后写死的生成器名失效。
-      - name: 环境信息
+      # 每步失败时把末尾输出通过 ::error:: 写进注解，便于在不下载日志的情况下定位问题。
+      - name: 配置
         shell: pwsh
         run: |
-          cmake --version
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (Test-Path $vswhere) { & $vswhere -latest -products * -property displayName, installationVersion }
-
-      - name: 配置
-        run: cmake -S builder -B build -DCMAKE_BUILD_TYPE=Release
+          $log = (cmake -S builder -B build -DCMAKE_BUILD_TYPE=Release 2>&1 | Out-String)
+          $code = $LASTEXITCODE
+          Write-Host $log
+          if ($code -ne 0) {
+            $tail = (($log -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 20) -join ' ⏎ ')
+            Write-Host "::error::CMake 配置失败(exit $code): $tail"
+            exit 1
+          }
 
       - name: 构建
-        run: cmake --build build --config Release
+        shell: pwsh
+        run: |
+          $log = (cmake --build build --config Release 2>&1 | Out-String)
+          $code = $LASTEXITCODE
+          Write-Host $log
+          if ($code -ne 0) {
+            $tail = (($log -split "`r?`n" | Where-Object { $_ -match 'error|Error|失败' } | Select-Object -Last 15) -join ' ⏎ ')
+            if (-not $tail) { $tail = (($log -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 15) -join ' ⏎ ') }
+            Write-Host "::error::构建失败(exit $code): $tail"
+            exit 1
+          }
 
       - name: 测试
-        run: ctest --test-dir build -C Release --output-on-failure
+        shell: pwsh
+        run: |
+          $log = (ctest --test-dir build -C Release --output-on-failure 2>&1 | Out-String)
+          $code = $LASTEXITCODE
+          Write-Host $log
+          if ($code -ne 0) {
+            $tail = (($log -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 20) -join ' ⏎ ')
+            Write-Host "::error::测试失败(exit $code): $tail"
+            exit 1
+          }
 
       - name: 打包
         shell: pwsh
@@ -88,7 +110,7 @@ jobs:
     name: macOS universal
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 读取版本号（version.h 是唯一来源）
         id: ver
