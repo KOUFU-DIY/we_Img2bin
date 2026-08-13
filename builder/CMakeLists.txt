@@ -135,6 +135,16 @@ target_include_directories(img2bin_qoi_algo
 )
 target_link_libraries(img2bin_qoi_algo PUBLIC img2bin_core)
 
+add_library(img2bin_indexqoimask_algo STATIC
+  src/algorithms/indexqoimask/indexqoimask_encoder.c
+)
+target_include_directories(img2bin_indexqoimask_algo
+  PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/algorithms/indexqoimask"
+)
+target_link_libraries(img2bin_indexqoimask_algo PUBLIC img2bin_core)
+
 add_library(img2bin_decoder STATIC
   src/decoder/img2bin_decode.c
 )
@@ -214,6 +224,18 @@ target_include_directories(img2bin_indexqoi_app
     "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_indexqoi"
 )
 target_link_libraries(img2bin_indexqoi_app PUBLIC img2bin_tool_app_core img2bin_qoi_algo)
+
+add_library(img2bin_indexqoimask_app STATIC
+  src/apps/img2bin_indexqoimask/app.c
+)
+target_include_directories(img2bin_indexqoimask_app
+  PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/apps"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/algorithms/indexqoimask"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_indexqoimask"
+)
+target_link_libraries(img2bin_indexqoimask_app PUBLIC img2bin_tool_app_core img2bin_indexqoimask_algo)
 
 add_executable(img2bin_raw
   src/apps/img2bin_raw/main.c
@@ -305,6 +327,21 @@ if(WIN32)
 endif()
 target_link_libraries(img2bin_indexqoi PRIVATE img2bin_indexqoi_app)
 
+add_executable(img2bin_indexqoimask
+  src/apps/img2bin_indexqoimask/main.c
+)
+if(WIN32)
+  img2bin_add_windows_resources(
+    img2bin_indexqoimask
+    FILE_DESCRIPTION "img2bin_indexqoimask"
+    INTERNAL_NAME "img2bin_indexqoimask"
+    ORIGINAL_FILENAME "img2bin_indexqoimask.exe"
+    PRODUCT_NAME "img2bin_indexqoimask"
+    ICON "${IMG2BIN_ICON_DIR}/QOIM-indexQOImask.ico"
+  )
+endif()
+target_link_libraries(img2bin_indexqoimask PRIVATE img2bin_indexqoimask_app)
+
 add_executable(img2bin_tests
   tests/test_main.c
 )
@@ -315,18 +352,20 @@ target_include_directories(img2bin_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/algorithms/imprle"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/algorithms/rle"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/algorithms/qoi"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/algorithms/indexqoimask"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_raw"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_imprle"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_rle"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_qoi"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_qoif"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_indexqoi"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/img2bin_indexqoimask"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/decoder"
   "${IMG2BIN_THIRD_PARTY_DIR}"
 )
 target_compile_definitions(img2bin_tests PRIVATE IMG2BIN_SOURCE_DIR="${IMG2BIN_SOURCE_DIR_CMAKE}")
-target_link_libraries(img2bin_tests PRIVATE img2bin_raw_app img2bin_imprle_app img2bin_rle_app img2bin_qoi_app img2bin_qoif_app img2bin_indexqoi_app img2bin_decoder)
-add_dependencies(img2bin_tests img2bin_raw img2bin_imprle img2bin_rle img2bin_qoi img2bin_qoif img2bin_indexqoi)
+target_link_libraries(img2bin_tests PRIVATE img2bin_raw_app img2bin_imprle_app img2bin_rle_app img2bin_qoi_app img2bin_qoif_app img2bin_indexqoi_app img2bin_indexqoimask_app img2bin_decoder)
+add_dependencies(img2bin_tests img2bin_raw img2bin_imprle img2bin_rle img2bin_qoi img2bin_qoif img2bin_indexqoi img2bin_indexqoimask)
 if(WIN32)
   target_link_libraries(img2bin_tests PRIVATE version)
 endif()

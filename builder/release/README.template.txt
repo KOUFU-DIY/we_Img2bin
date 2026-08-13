@@ -11,7 +11,7 @@ img2bin tools __VERSION_TEXT__
 - docs\user\README-schema.md
 
 目录结构:
-- windows\tools\              六个取模工具 exe
+- windows\tools\              七个取模工具 exe
 - decoder\                    C99 参考解码器源码（拷进下位机工程即可用）
 - docs\user\                  用户文档
 
@@ -24,9 +24,9 @@ img2bin tools __VERSION_TEXT__
 6. 也可以把单个图片或文件夹直接拖到 exe 上
 7. 每个 .bin = 6 字节通用资源头(类型+算法/格式码+宽高) + 算法数据
 
-二、六个程序的区别
+二、七个程序的区别
 - img2bin_raw.exe:
-  输出无压缩像素格式 bin（含 Alpha 蒙版格式 a8/a4/a2/a1，仅本工具支持）
+  输出无压缩像素格式 bin（含全部 Alpha 蒙版格式 a8/a4/a2/a1）
   输出文件命名:
   <原名>_<像素格式>_raw_<be|le>_<宽>x<高>.bin
 
@@ -56,12 +56,19 @@ img2bin tools __VERSION_TEXT__
   输出文件命名:
   <原名>_<像素格式>_indexqoi_<be|le>_<宽>x<高>.bin
 
+- img2bin_indexqoimask.exe:
+  输出索引QOI_MASK压缩的 a8 透明蒙版 bin（仅支持 a8，默认格式即 a8）
+  按行随机访问，默认 6bit 量化，可用 --quantize-bits 5|6|7|8 调整（8 为无损）
+  输出文件命名:
+  <原名>_a8_indexqoimask_<be|le>_<宽>x<高>.bin
+
 三、常用命令示例（在 windows\tools 下执行）
   img2bin_raw.exe --format rgb565
   img2bin_raw.exe --formats all
   img2bin_raw.exe --format a4
   img2bin_imprle.exe --format argb8888
   img2bin_indexqoi.exe --format argb8888 --index-interval 512
+  img2bin_indexqoimask.exe --quantize-bits 8
   img2bin_raw.exe --little-endian
   img2bin_raw.exe --bg-color FF0000
   img2bin_raw.exe --input input --output output
@@ -77,7 +84,7 @@ img2bin tools __VERSION_TEXT__
 - JPEG
 
 五、支持的像素格式
-六个工具通用的彩色格式:
+raw/imprle/rle/qoi/qoif/indexqoi 六个工具通用的彩色格式:
 - ARGB8888
 - ARGB6666
 - ARGB4444
@@ -88,10 +95,12 @@ img2bin tools __VERSION_TEXT__
 - RGB332
 - RAGB5155
 
-仅 img2bin_raw 支持的 Alpha 蒙版格式（只存透明度，GUI 运行时染色）:
-- A8 / A4 / A2 / A1
+Alpha 蒙版格式（只存透明度，GUI 运行时染色）:
+- A8 / A4 / A2 / A1: img2bin_raw 全部支持
+- A8 另可由 img2bin_indexqoimask 压缩输出（该工具仅支持 a8）
 
 六、补充说明
 - 当前版本号: __VERSION_TEXT__ (__VERSION_SEMVER__)
 - img2bin_indexqoi.exe 默认按图片宽度创建索引点
+- img2bin_indexqoimask.exe 默认 6bit 量化，--quantize-bits 8 为严格无损
 - 更完整的用户说明已随发布目录一起放到 docs\user

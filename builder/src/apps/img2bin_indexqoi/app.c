@@ -50,6 +50,8 @@ static const img2bin_tool_descriptor_t g_img2bin_indexqoi_tool = {
   "img2bin_indexqoi-manifest.json",
   1,
   0,
+  0,
+  0,
   IMG2BIN_HEADER_ALGO_INDEXQOI,
   img2bin_indexqoi_encode_adapter
 };

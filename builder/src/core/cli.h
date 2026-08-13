@@ -13,10 +13,16 @@ typedef struct img2bin_cli_options_s {
   img2bin_endianness_t endianness;
   img2bin_rgb_t background;
   unsigned int index_interval;
+  /* Alpha 量化位数 5..8（--quantize-bits），仅 indexQOI_MASK 类工具使用。 */
+  unsigned int quantize_bits;
   int show_help;
   int show_info;
   int list_formats;
   int index_interval_specified;
+  int quantize_bits_specified;
+  /* --format/--formats 显式给过格式时置 1；工具骨架据此判断是否要把
+     CLI 层的 rgb565 默认值替换成本工具自己的默认格式（如 a8 专用工具）。 */
+  int format_specified;
   /* 默认 0：不写 manifest 日志；--manifest 置 1 后所有运行形态都会
      在输出目录写 img2bin_<工具>-manifest.json。 */
   int write_manifest;

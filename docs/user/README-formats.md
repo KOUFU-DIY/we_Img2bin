@@ -12,7 +12,7 @@
 - 所有 `.bin` 文件都以 6 字节通用资源头开始（类型 + 算法/格式码 + 宽高，见 [协议与验证说明](README-protocol.md)）
 - 通用头之后的 `RAW / RLE / IMPRLE / QOI / QOIF` payload 不再包含任何头
 - `indexQOI`（V2）在通用头之后另有 14 字节索引头，后随索引表、静态调色盘与数据流
-- Alpha 蒙版格式（`A8/A4/A2/A1`）**只在 `img2bin_raw` 中可用**，按行打包，见本页末尾专节
+- Alpha 蒙版格式（`A8/A4/A2/A1`）在 `img2bin_raw` 中按行打包（见本页末尾专节）；`A8` 另可由 `img2bin_indexqoimask` 压缩输出（行索引 + tag 流，规格见其单独文档）
 
 ## 颜色量化与透明处理
 
@@ -69,7 +69,7 @@ out = (src * alpha + bg * (255 - alpha) + 127) / 255
 | `RGB565` | 2 | 无 | 是 | `OP_RGB` |
 | `RGB332` | 1 | 无 | 是 | `OP_RGB` |
 | `RAGB5155` | 2 | 1 | 否 | `OP_RGBA` |
-| `A8` | 1 | 8（仅 Alpha） | 否 | 不适用（仅 raw） |
+| `A8` | 1 | 8（仅 Alpha） | 否 | 不适用（raw / indexQOI_MASK） |
 | `A4` | 1/2（4bit/像素） | 4（仅 Alpha） | 否 | 不适用（仅 raw） |
 | `A2` | 1/4（2bit/像素） | 2（仅 Alpha） | 否 | 不适用（仅 raw） |
 | `A1` | 1/8（1bit/像素） | 1（仅 Alpha） | 否 | 不适用（仅 raw） |
@@ -79,7 +79,7 @@ out = (src * alpha + bg * (255 - alpha) + 127) / 255
 - `QOI` 家族里的 `OP_RGB = 0xFE`
 - `QOI` 家族里的 `OP_RGBA = 0xFF`
 - 这里的 `OP_RGB / OP_RGBA` 不是标准 QOI 的固定 3/4 字节形式，而是“跟随当前像素格式的原始打包字节数”
-- `A8/A4/A2/A1` 只保存 Alpha 通道，只有 `img2bin_raw` 支持；亚字节格式按行打包（见专节），“每像素字节数”对它们不适用
+- `A8/A4/A2/A1` 只保存 Alpha 通道：`img2bin_raw` 支持全部四种（行打包），`A8` 另可走 `img2bin_indexqoimask` 压缩；亚字节格式按行打包（见专节），“每像素字节数”对它们不适用
 
 ## 各格式详细规则
 
@@ -367,7 +367,7 @@ B5 = value & 0x1F
 
 ## A8 / A4 / A2 / A1（Alpha 蒙版）
 
-只保存透明度、不保存颜色的蒙版格式，供 GUI 运行时用前景色染色（单色图标、主题换色、字形式渲染）。**只有 `img2bin_raw` 支持**；其余五个工具显式点名会报错，`--formats all` 会静默跳过。
+只保存透明度、不保存颜色的蒙版格式，供 GUI 运行时用前景色染色（单色图标、主题换色、字形式渲染）。`img2bin_raw` 支持全部四种（本节的行打包规则）；`A8` 另可由 `img2bin_indexqoimask` 压缩输出（行索引 + tag 流 + 可选量化，规格见其单独文档）。其余五个工具显式点名任一蒙版格式会报错，`--formats all` 会静默跳过。
 
 ### 编码来源与量化
 

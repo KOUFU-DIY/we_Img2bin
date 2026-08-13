@@ -36,6 +36,8 @@ static const img2bin_tool_descriptor_t g_img2bin_qoi_tool = {
   "img2bin_qoi-manifest.json",
   0,
   0,
+  0,
+  0,
   IMG2BIN_HEADER_ALGO_QOI,
   img2bin_qoi_encode_adapter
 };

@@ -10,10 +10,12 @@
  *   - payload 级接口：img2bin_decode_raw/rle/imprle/qoi/qoif/indexqoi*，
  *     输入去掉 6 字节通用头后的裸流（indexQOI V2 裸流自带 14 字节索引头，
  *     后随 u16/u24/u32 索引区、静态调色盘与 QOI 数据流，无尾部结束码）；
- *     Alpha 蒙版格式（A8/A4/A2/A1，仅 raw 算法）走 img2bin_decode_raw_alpha。
+ *     Alpha 蒙版格式（A8/A4/A2/A1，raw 算法）走 img2bin_decode_raw_alpha；
+ *     indexQOI_MASK（算法 0x6，仅 A8）走 img2bin_decode_indexqoimask*。
  *
  * 所有解码输出都是 RAW 打包像素字节流（不含任何头），与
- * img2bin_raw.exe 输出的 payload 在同格式、同字节序下逐字节一致。
+ * img2bin_raw.exe 输出的 payload 在同格式、同字节序下逐字节一致
+ * （indexQOI_MASK 量化档 q<8 时输出为量化后按高位复制扩展的 8bit Alpha）。
  * 字节序不在头里，需要由外部提供（文件名或工程约定）。
  */
 #ifndef IMG2BIN_DECODE_H
@@ -26,11 +28,12 @@
 extern "C" {
 #endif
 
-/* A8/A4/A2/A1 是 Alpha 蒙版家族（只存透明度，仅 raw 算法）：
+/* A8/A4/A2/A1 是 Alpha 蒙版家族（只存透明度）：
    行字节对齐（行字节数 = (宽×bpp+7)/8）、MSB-first（最左像素在字节高位）、
    行尾补位为 0、无字节序维度。解码到 8bit alpha 的扩展规则：
    A8 恒等；A4 v→(v<<4)|v；A2 v→v*0x55；A1 v→0/255。
-   这批格式只能走文件级接口或 img2bin_decode_raw_alpha；
+   合法算法组合：四种格式 × raw（img2bin_decode_raw_alpha），以及
+   A8 × indexQOI_MASK（img2bin_decode_indexqoimask*）；其余组合是非法流。
    按 pixel_count 的 payload 级接口一律返回 ERR_ARGUMENTS。 */
 typedef enum img2bin_decode_format_e {
   IMG2BIN_DECODE_FMT_ARGB8888 = 0,
@@ -72,7 +75,8 @@ typedef enum img2bin_decode_algorithm_e {
   IMG2BIN_DECODE_ALGO_IMPRLE = 0x2,
   IMG2BIN_DECODE_ALGO_QOI = 0x3,
   IMG2BIN_DECODE_ALGO_INDEXQOI = 0x4,
-  IMG2BIN_DECODE_ALGO_QOIF = 0x5
+  IMG2BIN_DECODE_ALGO_QOIF = 0x5,
+  IMG2BIN_DECODE_ALGO_INDEXQOIMASK = 0x6
 } img2bin_decode_algorithm_t;
 
 typedef struct img2bin_decode_header_s {
@@ -191,6 +195,23 @@ img2bin_decode_status_t img2bin_decode_qoif(
   size_t output_capacity,
   size_t *out_written);
 
+/* indexQOI_MASK（算法 nibble 0x6，仅 A8 蒙版）payload 头。payload 不含宽高
+   （宽高在 6 字节通用资源头里），布局（多字节字段恒大端）：
+     [0] 标志位（b1:b0 量化位数 q：00=8bit 01=7bit 10=6bit 11=5bit，b7..b2 恒 0）
+     [1..2] u16 行索引项数量 m   [3..4] u32 行索引项数量（必须 = 高−m）
+     [u16 行索引表 m×2B][u32 行索引表 (高−m)×4B][字典数量 n(1B, 0..64)]
+     [字典 n×1B（q 位域值）][像素流]
+   行索引 = 该行数据相对像素流起点的字节偏移；行去重后多行可指向同一偏移，
+   第 r 行：r<m 查 u16 表第 r 项，否则查 u32 表第 r−m 项。 */
+typedef struct img2bin_indexqoimask_header_s {
+  uint8_t quantize_bits; /* 5..8 */
+  uint16_t u16_count;    /* m */
+  uint16_t u32_count;    /* = 高 − m */
+  uint8_t dict_count;    /* 0..64，0 = 无字典（INDEX op 不可用） */
+  size_t dict_offset;    /* 字典首项在 payload 内的偏移 */
+  size_t stream_offset;  /* 像素流起点在 payload 内的偏移 */
+} img2bin_indexqoimask_header_t;
+
 img2bin_decode_status_t img2bin_decode_indexqoi_header(
   const uint8_t *input,
   size_t input_size,
@@ -218,6 +239,45 @@ img2bin_decode_status_t img2bin_decode_indexqoi_from_slot(
   img2bin_decode_format_t format,
   img2bin_decode_endianness_t endianness,
   size_t slot,
+  uint8_t *output,
+  size_t output_capacity,
+  size_t *out_written);
+
+/* ===== indexQOI_MASK（算法 0x6，仅 A8）payload 级接口 =====
+   高（height）来自 6 字节通用资源头，用于校验/切分两张行索引表。
+   解码输出为 8bit Alpha（每像素 1 字节）：量化档 q<8 时按高位复制扩展
+   out = (v<<s)|(v>>(q−s))（s = 8−q），q=8 恒等（与 raw a8 payload 逐字节一致）。 */
+img2bin_decode_status_t img2bin_decode_indexqoimask_header(
+  const uint8_t *input,
+  size_t input_size,
+  uint16_t height,
+  img2bin_indexqoimask_header_t *out_header);
+
+/* 取第 row 行数据相对像素流起点的字节偏移（行去重后偏移不随行号单调）。 */
+img2bin_decode_status_t img2bin_decode_indexqoimask_row_offset(
+  const uint8_t *input,
+  size_t input_size,
+  uint16_t height,
+  size_t row,
+  uint32_t *out_offset);
+
+/* 按行随机访问：解码第 row 行到 width 字节的 8bit Alpha。 */
+img2bin_decode_status_t img2bin_decode_indexqoimask_row(
+  const uint8_t *input,
+  size_t input_size,
+  uint16_t width,
+  uint16_t height,
+  size_t row,
+  uint8_t *output,
+  size_t output_capacity,
+  size_t *out_written);
+
+/* 整图解码到 宽×高 字节的 8bit Alpha（逐行经行索引定位，不假设行间连续）。 */
+img2bin_decode_status_t img2bin_decode_indexqoimask(
+  const uint8_t *input,
+  size_t input_size,
+  uint16_t width,
+  uint16_t height,
   uint8_t *output,
   size_t output_capacity,
   size_t *out_written);

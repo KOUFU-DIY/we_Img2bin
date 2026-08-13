@@ -1,15 +1,16 @@
 # 工具说明
 
-本页是六个 `exe` 的总览与共同行为说明。每个工具另有单独的完整文档：
+本页是七个 `exe` 的总览与共同行为说明。每个工具另有单独的完整文档：
 
 | 工具 | 用途 | 单独文档 |
 | --- | --- | --- |
-| `img2bin_raw.exe` | 无压缩（唯一支持 Alpha 蒙版 `a8/a4/a2/a1`） | [README-img2bin_raw.md](README-img2bin_raw.md) |
+| `img2bin_raw.exe` | 无压缩（唯一支持全部 Alpha 蒙版 `a8/a4/a2/a1`） | [README-img2bin_raw.md](README-img2bin_raw.md) |
 | `img2bin_imprle.exe` | 改进 RLE（原样段 + 重复段） | [README-img2bin_imprle.md](README-img2bin_imprle.md) |
 | `img2bin_rle.exe` | 原始 RLE（纯重复段） | [README-img2bin_rle.md](README-img2bin_rle.md) |
 | `img2bin_qoi.exe` | 原始 QOI（64 项字典，压缩率通常最好） | [README-img2bin_qoi.md](README-img2bin_qoi.md) |
 | `img2bin_qoif.exe` | 原始 QOI 无字典（解码最简单） | [README-img2bin_qoif.md](README-img2bin_qoif.md) |
 | `img2bin_indexqoi.exe` | 索引 QOI V2（静态调色盘 + 跳转索引） | [README-img2bin_indexqoi.md](README-img2bin_indexqoi.md) |
+| `img2bin_indexqoimask.exe` | 索引 QOI_MASK（`a8` 蒙版专用，按行随机访问 + 可选量化） | [README-img2bin_indexqoimask.md](README-img2bin_indexqoimask.md) |
 
 如果你要根据本工具生成的 `.bin` 自己编写解码器，请优先阅读：
 
@@ -18,7 +19,7 @@
 
 ## 共同特性
 
-六个工具都支持：
+七个工具都支持：
 
 - 双击运行
 - 拖拽图片或目录到 `exe`
@@ -33,9 +34,11 @@
 - `--info`
 - `--list-formats`
 
+工具专属参数：`img2bin_indexqoi` 另有 `--index-interval`；`img2bin_indexqoimask` 另有 `--quantize-bits`。
+
 共同默认值：
 
-- 默认格式：`rgb565`
+- 默认格式：`rgb565`（`img2bin_indexqoimask` 例外，默认且仅支持 `a8`）
 - 默认字节序：大端
 - 默认输入目录：`<exe_dir>\input`
 - 默认输出目录：`<exe_dir>\output`
@@ -55,7 +58,7 @@ Wrote out\logo_rgb565_indexqoi_be_128x64.bin (1290 bytes, payload 1284 / raw 163
 <原图名>_<像素格式>_<算法>_<be|le>_<宽>x<高>.bin
 ```
 
-算法段依次为 `raw` / `imprle` / `rle` / `qoi` / `qoif` / `indexqoi`。这个命名是机器接口——下游资源管线（bin2c 类工具、自动化脚本）靠解析它取得格式/算法/字节序/宽高。所有 `.bin` 都以 6 字节通用资源头开始（见[协议与验证说明](README-protocol.md)）。
+算法段依次为 `raw` / `imprle` / `rle` / `qoi` / `qoif` / `indexqoi` / `indexqoimask`。这个命名是机器接口——下游资源管线（bin2c 类工具、自动化脚本）靠解析它取得格式/算法/字节序/宽高。所有 `.bin` 都以 6 字节通用资源头开始（见[协议与验证说明](README-protocol.md)）。
 
 ## 怎么选算法
 
@@ -64,6 +67,7 @@ Wrote out\logo_rgb565_indexqoi_be_128x64.bin (1290 bytes, payload 1284 / raw 163
 - **追求压缩率、解码端能给 64 项字典 RAM** → `qoi`
 - **要最简单的 QOI 系解码器** → `qoif`
 - **要局部跳转解码（按行/按区域刷屏）+ 高压缩率** → `indexqoi`（V2 静态调色盘）
+- **`a8` 蒙版要压缩 + 按行随机访问（PFB 逐切片渲染）** → `indexqoimask`（可选 5/6/7/8 bit 量化）
 
 工具专属参数、payload 布局与完整示例见各工具的单独文档（页首表格）。
 

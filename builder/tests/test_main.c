@@ -19,6 +19,7 @@
 
 #include "img2bin_imprle/app.h"
 #include "img2bin_indexqoi/app.h"
+#include "img2bin_indexqoimask/app.h"
 #include "img2bin_qoi/app.h"
 #include "img2bin_qoif/app.h"
 #include "img2bin_raw/app.h"
@@ -28,6 +29,7 @@
 #include "image_io.h"
 #include "img2bin_decode.h"
 #include "imprle_encoder.h"
+#include "indexqoimask_encoder.h"
 #include "qoi_encoder.h"
 #include "raw_encoder.h"
 #include "rle_encoder.h"
@@ -1197,6 +1199,107 @@ static void test_indexqoi_default_interval_uses_image_width(void)
   free(encoded);
 }
 
+/* 索引QOI_MASK 黄金字节（q=8 无损）：覆盖 行首原始字节、RUN（含计数 0）、
+   DIFF、INDEX、ALPHA、两遍法字典（频次 ≥2 进典、同频次按值降序）、
+   行去重共享偏移、u16 行索引表；RGB 填干扰值证明只取 Alpha 通道。 */
+static void test_indexqoimask_golden_values(void)
+{
+  /* 3 行 8 列；行1 与 行0 完全相同（去重后共享偏移 0）。
+     行0: 10,10,10,10,12,11,60,200 -> 首字节10, RUN×3, DIFF(+2,-1), 60/200 落字典
+     行2: 200,60,60,200,200,200,200,200 -> 首字节200, INDEX, RUN×1, INDEX, RUN×4
+     ALPHA 兜底频次: 60×2、200×2 -> 字典 [200, 60]（同频次值降序） */
+  const unsigned char alphas[24] = {
+    10, 10, 10, 10, 12, 11, 60, 200,
+    10, 10, 10, 10, 12, 11, 60, 200,
+    200, 60, 60, 200, 200, 200, 200, 200
+  };
+  const unsigned char expected[] = {
+    0x00,                               /* 标志位: q=8 (b1:b0=00) */
+    0x00, 0x03,                         /* u16 行索引项数量 m=3 */
+    0x00, 0x00,                         /* u32 行索引项数量 = 高-m = 0 */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x05, /* u16 行索引: 0, 0（去重）, 5 */
+    0x02, 0xC8, 0x3C,                   /* 字典 2 项: 200, 60 */
+    0x0A, 0xC2, 0x73, 0x01, 0x00,      /* 行0: 10, RUN c=2, DIFF(6,3), INDEX1, INDEX0 */
+    0xC8, 0x01, 0xC0, 0x00, 0xC3       /* 行2: 200, INDEX1, RUN c=0, INDEX0, RUN c=3 */
+  };
+  unsigned char pixels[24 * 4];
+  unsigned char *encoded = NULL;
+  size_t encoded_size = 0;
+  char error[256];
+  img2bin_image_t image;
+  img2bin_rgb_t background = { 255, 255, 255 };
+  size_t index = 0;
+
+  memset(pixels, 0xDE, sizeof(pixels));
+  for (index = 0; index < 24; ++index) {
+    pixels[index * 4 + 3] = alphas[index];
+  }
+  image.width = 8;
+  image.height = 3;
+  image.pixels = pixels;
+
+  TEST_ASSERT(
+    img2bin_encode_indexqoimask_image(IMG2BIN_FMT_A8, IMG2BIN_ENDIAN_BIG, background, &image, 8u, &encoded, &encoded_size, error, sizeof(error)),
+    error);
+  TEST_ASSERT(encoded_size == sizeof(expected), "IndexQOI mask q=8 golden size mismatch.");
+  test_expect_bytes(encoded, expected, sizeof(expected), "IndexQOI mask q=8 golden payload");
+  free(encoded);
+  encoded = NULL;
+
+  /* 字节序对本算法无影响：le 输出必须与 be 逐字节一致。 */
+  TEST_ASSERT(
+    img2bin_encode_indexqoimask_image(IMG2BIN_FMT_A8, IMG2BIN_ENDIAN_LITTLE, background, &image, 8u, &encoded, &encoded_size, error, sizeof(error)),
+    error);
+  TEST_ASSERT(encoded_size == sizeof(expected), "IndexQOI mask le/be size mismatch.");
+  test_expect_bytes(encoded, expected, sizeof(expected), "IndexQOI mask endianness-neutral payload");
+  free(encoded);
+}
+
+/* 量化档位黄金：quantize_bits 传 0 时默认 6bit（v = a>>2、流内全为 6 位域值、
+   DELTA 差分不回绕）；同时验证解码端按高位复制扩展的 8bit 输出。 */
+static void test_indexqoimask_quantize_golden_and_default_bits(void)
+{
+  const unsigned char alphas[4] = { 255, 247, 128, 0 };
+  const unsigned char expected[] = {
+    0x02,                   /* 标志位: q=6 (b1:b0=10) */
+    0x00, 0x01, 0x00, 0x00, /* m=1, u32 项数 0 */
+    0x00, 0x00,             /* 行0 偏移 0 */
+    0x00,                   /* 字典 0 项 */
+    0x3F, 0x9E, 0x83, 0x80  /* 首字节63, DELTA-2, DELTA-29, DELTA-32 */
+  };
+  const unsigned char expected_alpha[4] = { 255, 247, 130, 0 }; /* expand(63/61/32/0) */
+  unsigned char pixels[4 * 4];
+  unsigned char decoded[4];
+  unsigned char *encoded = NULL;
+  size_t encoded_size = 0;
+  size_t decoded_size = 0;
+  char error[256];
+  img2bin_image_t image;
+  img2bin_rgb_t background = { 0, 0, 0 };
+  img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
+  size_t index = 0;
+
+  memset(pixels, 0xAD, sizeof(pixels));
+  for (index = 0; index < 4; ++index) {
+    pixels[index * 4 + 3] = alphas[index];
+  }
+  image.width = 4;
+  image.height = 1;
+  image.pixels = pixels;
+
+  TEST_ASSERT(
+    img2bin_encode_indexqoimask_image(IMG2BIN_FMT_A8, IMG2BIN_ENDIAN_BIG, background, &image, 0u, &encoded, &encoded_size, error, sizeof(error)),
+    error);
+  TEST_ASSERT(encoded_size == sizeof(expected), "IndexQOI mask default-bits golden size mismatch.");
+  test_expect_bytes(encoded, expected, sizeof(expected), "IndexQOI mask default 6-bit golden payload");
+
+  status = img2bin_decode_indexqoimask(encoded, encoded_size, 4u, 1u, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_OK, "IndexQOI mask 6-bit decode failed.");
+  TEST_ASSERT(decoded_size == 4u, "IndexQOI mask 6-bit decode size mismatch.");
+  test_expect_bytes(decoded, expected_alpha, 4, "IndexQOI mask 6-bit high-bit replication expansion");
+  free(encoded);
+}
+
 static void test_image_loading_for_png_bmp_jpg(void)
 {
   char stage[IMG2BIN_PATH_CAPACITY];
@@ -1276,6 +1379,10 @@ static void test_info_json(void)
   TEST_ASSERT(strstr(json, "\"name\": \"a1\"") != NULL, "Raw info JSON missing a1 alpha mask format.");
   TEST_ASSERT(strstr(json, "\"bits_per_pixel\": 4") != NULL, "Raw info JSON missing sub-byte bits-per-pixel metadata.");
   TEST_ASSERT(strstr(json, "\"is_alpha_only\": true") != NULL, "Raw info JSON missing alpha-only capability.");
+  TEST_ASSERT(strstr(json, "\"format\": \"rgb565\"") != NULL, "Raw info JSON missing rgb565 default format.");
+  TEST_ASSERT(strstr(json, "\"supports_quantize_bits\": false") != NULL, "Raw info JSON missing quantize-bits capability flag.");
+  TEST_ASSERT(strstr(json, "\"flag\": \"--quantize-bits\"") == NULL, "Raw info JSON must not list the quantize-bits argument.");
+  TEST_ASSERT(strstr(json, "\"supports_multi_format\": true") != NULL, "Raw info JSON missing multi-format capability.");
 }
 
 static void test_imprle_info_json(void)
@@ -1360,6 +1467,37 @@ static void test_indexqoi_info_json(void)
   TEST_ASSERT(strstr(json, "\"index_interval\": \"image_width\"") != NULL, "IndexQOI info JSON missing default index interval.");
   TEST_ASSERT(strstr(json, "\"flag\": \"--index-interval\"") != NULL, "IndexQOI info JSON missing invocation flag for index interval.");
   TEST_ASSERT(strstr(json, "\"name\": \"a8\"") == NULL, "IndexQOI info JSON must not list alpha mask formats.");
+}
+
+static void test_indexqoimask_info_json(void)
+{
+  char json[16384];
+
+  TEST_ASSERT(img2bin_indexqoimask_get_info_json(json, sizeof(json)), "Could not build IndexQOI mask info JSON.");
+  TEST_ASSERT(strstr(json, "\"schema_version\": \"" IMG2BIN_INFO_SCHEMA_VERSION "\"") != NULL, "IndexQOI mask info JSON missing schema version.");
+  TEST_ASSERT(strstr(json, "\"id\": \"img2bin_indexqoimask\"") != NULL, "IndexQOI mask info JSON missing tool id.");
+  TEST_ASSERT(strstr(json, "\"id\": \"indexqoimask\"") != NULL, "IndexQOI mask info JSON missing algorithm id.");
+  TEST_ASSERT(strstr(json, "\"algorithm_code\": \"indexqoimask\"") != NULL, "IndexQOI mask info JSON missing algorithm code.");
+  TEST_ASSERT(strstr(json, "\"compression\": \"indexed_qoi_mask\"") != NULL, "IndexQOI mask info JSON missing compression type.");
+  TEST_ASSERT(strstr(json, "\"zh_cn\": \"索引QOI蒙版取模\"") != NULL, "IndexQOI mask info JSON missing Chinese display name.");
+  TEST_ASSERT(strstr(json, "\"en\": \"Indexed QOI Mask Converter\"") != NULL, "IndexQOI mask info JSON missing English display name.");
+  TEST_ASSERT(strstr(json, "\"filename_pattern\": \"{source_stem}_{format_name}_indexqoimask_{endianness_token}_{width}x{height}.bin\"") != NULL, "IndexQOI mask info JSON missing filename pattern.");
+  TEST_ASSERT(strstr(json, "\"algorithm_nibble\": 6") != NULL, "IndexQOI mask info JSON missing algorithm nibble.");
+  TEST_ASSERT(strstr(json, "\"format\": \"a8\"") != NULL, "IndexQOI mask info JSON missing a8 default format.");
+  TEST_ASSERT(strstr(json, "\"quantize_bits\": 6") != NULL, "IndexQOI mask info JSON missing default quantize bits.");
+  TEST_ASSERT(strstr(json, "\"supports_quantize_bits\": true") != NULL, "IndexQOI mask info JSON missing quantize-bits capability.");
+  TEST_ASSERT(strstr(json, "\"supports_index_interval\": false") != NULL, "IndexQOI mask info JSON must not claim index-interval support.");
+  TEST_ASSERT(strstr(json, "\"supports_multi_format\": false") != NULL, "IndexQOI mask info JSON must not claim multi-format support.");
+  TEST_ASSERT(strstr(json, "\"supports_multiple_formats\": false") != NULL, "IndexQOI mask info JSON must not claim multiple-format output.");
+  TEST_ASSERT(strstr(json, "\"flag\": \"--quantize-bits\"") != NULL, "IndexQOI mask info JSON missing invocation flag for quantize bits.");
+  TEST_ASSERT(strstr(json, "\"default\": \"a8\"") != NULL, "IndexQOI mask info JSON missing a8 default for the format argument.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a8\"") != NULL, "IndexQOI mask info JSON must list the a8 format.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a4\"") == NULL, "IndexQOI mask info JSON must not list a4.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a2\"") == NULL, "IndexQOI mask info JSON must not list a2.");
+  TEST_ASSERT(strstr(json, "\"name\": \"a1\"") == NULL, "IndexQOI mask info JSON must not list a1.");
+  TEST_ASSERT(strstr(json, "\"name\": \"rgb565\"") == NULL, "IndexQOI mask info JSON must not list color formats.");
+  TEST_ASSERT(strstr(json, "\"name\": \"argb8888\"") == NULL, "IndexQOI mask info JSON must not list argb8888.");
+  TEST_ASSERT(strstr(json, "\"is_alpha_only\": true") != NULL, "IndexQOI mask info JSON missing alpha-only metadata.");
 }
 
 static void test_cli_default_mode_and_unicode_paths(void)
@@ -1839,9 +1977,11 @@ static void test_resource_header_golden(void)
   unsigned char header[IMG2BIN_RESOURCE_HEADER_SIZE];
   const unsigned char expected_raw_rgb565[IMG2BIN_RESOURCE_HEADER_SIZE] = { 0x00, 0x00, 0x00, 0x02, 0x00, 0x03 };
   const unsigned char expected_qoif_ragb[IMG2BIN_RESOURCE_HEADER_SIZE] = { 0x00, 0x5A, 0x01, 0x00, 0x00, 0x40 };
+  /* indexQOI_MASK + A8 的格式码恒为 0x6B（高 nibble 0x6 = 算法，低 nibble 0xB = A8）。 */
+  const unsigned char expected_indexqoimask_a8[IMG2BIN_RESOURCE_HEADER_SIZE] = { 0x00, 0x6B, 0x00, 0x30, 0x00, 0x30 };
   const unsigned char bad_type[IMG2BIN_RESOURCE_HEADER_SIZE] = { 0x01, 0x00, 0x00, 0x01, 0x00, 0x01 };
   const unsigned char bad_format[IMG2BIN_RESOURCE_HEADER_SIZE] = { 0x00, 0x02, 0x00, 0x01, 0x00, 0x01 };
-  const unsigned char bad_algo[IMG2BIN_RESOURCE_HEADER_SIZE] = { 0x00, 0x60, 0x00, 0x01, 0x00, 0x01 };
+  const unsigned char bad_algo[IMG2BIN_RESOURCE_HEADER_SIZE] = { 0x00, 0x70, 0x00, 0x01, 0x00, 0x01 };
   img2bin_decode_header_t decoded_header;
 
   TEST_ASSERT(img2bin_get_format_header_nibble(IMG2BIN_FMT_RGB565) == 0x0, "RGB565 header nibble mismatch.");
@@ -1864,6 +2004,9 @@ static void test_resource_header_golden(void)
   TEST_ASSERT(img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_QOIF, IMG2BIN_FMT_RAGB5155, 256u, 64u, header), "Could not build the qoif/ragb5155 header.");
   test_expect_bytes(header, expected_qoif_ragb, IMG2BIN_RESOURCE_HEADER_SIZE, "qoif ragb5155 resource header");
 
+  TEST_ASSERT(img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_INDEXQOIMASK, IMG2BIN_FMT_A8, 48u, 48u, header), "Could not build the indexqoimask/a8 header.");
+  test_expect_bytes(header, expected_indexqoimask_a8, IMG2BIN_RESOURCE_HEADER_SIZE, "indexqoimask a8 resource header");
+
   TEST_ASSERT(!img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_RAW, IMG2BIN_FMT_RGB565, 0u, 3u, header), "Zero width must be rejected.");
   TEST_ASSERT(!img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_RAW, IMG2BIN_FMT_RGB565, 65536u, 3u, header), "Width above 65535 must be rejected.");
 
@@ -1871,6 +2014,10 @@ static void test_resource_header_golden(void)
   TEST_ASSERT(decoded_header.algorithm_nibble == 0x5, "Decoded header algorithm mismatch.");
   TEST_ASSERT(decoded_header.format == IMG2BIN_DECODE_FMT_RAGB5155, "Decoded header format mismatch.");
   TEST_ASSERT(decoded_header.width == 256 && decoded_header.height == 64, "Decoded header dimensions mismatch.");
+
+  TEST_ASSERT(img2bin_decode_header(expected_indexqoimask_a8, IMG2BIN_RESOURCE_HEADER_SIZE, &decoded_header) == IMG2BIN_DECODE_OK, "Decoder rejected a valid indexqoimask header.");
+  TEST_ASSERT(decoded_header.algorithm_nibble == 0x6, "Decoded indexqoimask header algorithm mismatch.");
+  TEST_ASSERT(decoded_header.format == IMG2BIN_DECODE_FMT_A8, "Decoded indexqoimask header format mismatch.");
 
   TEST_ASSERT(img2bin_decode_header(bad_type, IMG2BIN_RESOURCE_HEADER_SIZE, &decoded_header) == IMG2BIN_DECODE_ERR_CORRUPT, "Font resource type must be rejected by the image decoder.");
   TEST_ASSERT(img2bin_decode_header(bad_format, IMG2BIN_RESOURCE_HEADER_SIZE, &decoded_header) == IMG2BIN_DECODE_ERR_CORRUPT, "Legacy RGB555 nibble must be rejected.");
@@ -2226,6 +2373,178 @@ static void test_indexqoi_cli_and_manifest(void)
   free(manifest_text);
 }
 
+/* 索引QOI_MASK CLI：不传 --format 时默认格式为 a8；--quantize-bits 8 生效；
+   输出文件 = 6 字节通用头（算法 0x6 + 格式 0xB）+ 编码 payload；manifest 正常。 */
+static void test_indexqoimask_cli_and_manifest(void)
+{
+  char stage[IMG2BIN_PATH_CAPACITY];
+  char input_dir[IMG2BIN_PATH_CAPACITY];
+  char output_dir[IMG2BIN_PATH_CAPACITY];
+  char image_path[IMG2BIN_PATH_CAPACITY];
+  char exe_path[IMG2BIN_PATH_CAPACITY];
+  char output_path[IMG2BIN_PATH_CAPACITY];
+  char manifest_path[IMG2BIN_PATH_CAPACITY];
+  char *manifest_text = NULL;
+  unsigned char pixels[6 * 4];
+  const unsigned char alphas[6] = { 0, 128, 255, 10, 200, 60 };
+  unsigned char *expected = NULL;
+  unsigned char *actual = NULL;
+  size_t expected_size = 0;
+  size_t actual_size = 0;
+  char error[256];
+  img2bin_image_t image;
+  img2bin_rgb_t background = { 0, 0, 0 };
+  size_t index = 0;
+  const char *argv_run[] = {
+    "img2bin_indexqoimask",
+    "--input",
+    NULL,
+    "--output",
+    NULL,
+    "--quantize-bits",
+    "8",
+    "--manifest"
+  };
+
+  memset(&image, 0, sizeof(image));
+  memset(pixels, 0x5A, sizeof(pixels));
+  for (index = 0; index < 6; ++index) {
+    pixels[index * 4 + 3] = alphas[index];
+  }
+
+  test_make_stage_directory("indexqoimask_cli", stage, sizeof(stage));
+  TEST_ASSERT(img2bin_path_join(stage, "input", input_dir, sizeof(input_dir)), "Could not compose IndexQOI mask input directory.");
+  TEST_ASSERT(img2bin_path_join(stage, "out", output_dir, sizeof(output_dir)), "Could not compose IndexQOI mask output directory.");
+  TEST_ASSERT(img2bin_path_join(stage, "img2bin_indexqoimask.exe", exe_path, sizeof(exe_path)), "Could not compose IndexQOI mask executable override path.");
+  TEST_ASSERT(img2bin_make_dirs(input_dir, error, sizeof(error)), error);
+  TEST_ASSERT(img2bin_make_dirs(output_dir, error, sizeof(error)), error);
+  TEST_ASSERT(img2bin_path_join(input_dir, "sample.png", image_path, sizeof(image_path)), "Could not compose IndexQOI mask input fixture.");
+  test_write_rgba_fixture(image_path, 3, 2, pixels);
+
+  argv_run[2] = input_dir;
+  argv_run[4] = output_dir;
+  TEST_ASSERT(img2bin_indexqoimask_run_with_executable_path(8, argv_run, exe_path) == 0, "IndexQOI mask CLI directory run failed.");
+
+  TEST_ASSERT(img2bin_path_join(output_dir, "sample_a8_indexqoimask_be_3x2.bin", output_path, sizeof(output_path)), "Could not compose IndexQOI mask output path.");
+  TEST_ASSERT(img2bin_path_join(output_dir, "img2bin_indexqoimask-manifest.json", manifest_path, sizeof(manifest_path)), "Could not compose IndexQOI mask manifest path.");
+  TEST_ASSERT(img2bin_is_regular_file(output_path), "IndexQOI mask CLI did not emit the default a8 output file.");
+  TEST_ASSERT(img2bin_is_regular_file(manifest_path), "IndexQOI mask CLI did not emit expected manifest.");
+
+  TEST_ASSERT(img2bin_load_image(image_path, &image, error, sizeof(error)), error);
+  TEST_ASSERT(
+    img2bin_encode_indexqoimask_image(IMG2BIN_FMT_A8, IMG2BIN_ENDIAN_BIG, background, &image, 8u, &expected, &expected_size, error, sizeof(error)),
+    error);
+  TEST_ASSERT(img2bin_read_file(output_path, &actual, &actual_size, error, sizeof(error)), error);
+  TEST_ASSERT(actual_size >= IMG2BIN_RESOURCE_HEADER_SIZE + 1u, "IndexQOI mask CLI output is missing the payload.");
+  TEST_ASSERT(actual[IMG2BIN_RESOURCE_HEADER_SIZE] == 0x00, "IndexQOI mask CLI output did not keep the requested lossless depth.");
+  test_expect_headered_file(actual, actual_size, expected, expected_size, IMG2BIN_HEADER_ALGO_INDEXQOIMASK, IMG2BIN_FMT_A8, image.width, image.height, "IndexQOI mask CLI output");
+
+  manifest_text = test_read_text_file(manifest_path);
+  TEST_ASSERT(manifest_text != NULL, "Could not read IndexQOI mask manifest.");
+  TEST_ASSERT(strstr(manifest_text, "\"id\": \"img2bin_indexqoimask\"") != NULL, "IndexQOI mask manifest missing tool id.");
+  TEST_ASSERT(strstr(manifest_text, "\"status\": \"success\"") != NULL, "IndexQOI mask manifest missing success item.");
+  TEST_ASSERT(strstr(manifest_text, "sample_a8_indexqoimask_be_3x2.bin") != NULL, "IndexQOI mask manifest missing output name.");
+  TEST_ASSERT(strstr(manifest_text, "\"requested_formats\": [\"a8\"]") != NULL, "IndexQOI mask manifest missing a8 default format.");
+
+  img2bin_free_image(&image);
+  free(expected);
+  free(actual);
+  free(manifest_text);
+}
+
+/* 索引QOI_MASK 的格式/选项门禁：显式点名任何非 a8 格式报 CLI 错误；
+   --formats all 静默滤除到只剩 a8；--quantize-bits 在其他工具上报 CLI 错误；
+   非法档位值在 CLI 解析层报错。 */
+static void test_indexqoimask_format_and_option_gate(void)
+{
+  char stage[IMG2BIN_PATH_CAPACITY];
+  char image_path[IMG2BIN_PATH_CAPACITY];
+  char output_dir[IMG2BIN_PATH_CAPACITY];
+  char stderr_path[IMG2BIN_PATH_CAPACITY];
+  char mask_exe[IMG2BIN_PATH_CAPACITY];
+  char raw_exe[IMG2BIN_PATH_CAPACITY];
+  char expected_a8[IMG2BIN_PATH_CAPACITY];
+  char rejected_rgb565[IMG2BIN_PATH_CAPACITY];
+  char error[256];
+  char *stderr_text = NULL;
+  int saved_fd = -1;
+  int exit_code = 0;
+  unsigned char pixel[4] = { 0x12, 0x34, 0x56, 0x9A };
+  const char *argv_rgb565[] = { "img2bin_indexqoimask", NULL, "--output", NULL, "--format", "rgb565" };
+  const char *argv_a4[] = { "img2bin_indexqoimask", NULL, "--output", NULL, "--format", "a4" };
+  const char *argv_all[] = { "img2bin_indexqoimask", NULL, "--output", NULL, "--formats", "all" };
+  const char *argv_raw_quantize[] = { "img2bin_raw", NULL, "--output", NULL, "--quantize-bits", "6" };
+  const char *argv_bad_bits[] = { "img2bin_indexqoimask", NULL, "--output", NULL, "--quantize-bits", "9" };
+
+  test_make_stage_directory("indexqoimask_gate", stage, sizeof(stage));
+  TEST_ASSERT(img2bin_path_join(stage, "mask.png", image_path, sizeof(image_path)), "Could not compose gate fixture path.");
+  TEST_ASSERT(img2bin_path_join(stage, "out", output_dir, sizeof(output_dir)), "Could not compose gate output directory.");
+  TEST_ASSERT(img2bin_path_join(stage, "stderr-mask-gate.jsonl", stderr_path, sizeof(stderr_path)), "Could not compose gate stderr path.");
+  TEST_ASSERT(img2bin_path_join(stage, "img2bin_indexqoimask.exe", mask_exe, sizeof(mask_exe)), "Could not compose mask executable override path.");
+  TEST_ASSERT(img2bin_path_join(stage, "img2bin_raw.exe", raw_exe, sizeof(raw_exe)), "Could not compose raw executable override path.");
+  TEST_ASSERT(img2bin_make_dirs(output_dir, error, sizeof(error)), error);
+  test_write_rgba_fixture(image_path, 1, 1, pixel);
+
+  /* 显式点名彩色格式：报 CLI 错误。 */
+  argv_rgb565[1] = image_path;
+  argv_rgb565[3] = output_dir;
+  TEST_ASSERT(test_redirect_stderr_begin(stderr_path, &saved_fd), "Could not redirect stderr for the rgb565 gate test.");
+  exit_code = img2bin_indexqoimask_run_with_executable_path(6, argv_rgb565, mask_exe);
+  TEST_ASSERT(test_redirect_stderr_end(saved_fd), "Could not restore stderr for the rgb565 gate test.");
+  TEST_ASSERT(exit_code == 1, "Explicit rgb565 on the a8-only tool must return exit code 1.");
+  stderr_text = test_read_text_file(stderr_path);
+  TEST_ASSERT(stderr_text != NULL, "Could not read rgb565 gate error output.");
+  TEST_ASSERT(test_count_nonempty_lines(stderr_text) == 1, "rgb565 gate error output should contain exactly one JSON line.");
+  TEST_ASSERT(strstr(stderr_text, "\"code\":\"cli_parse_failed\"") != NULL, "rgb565 gate error JSON missing code.");
+  TEST_ASSERT(strstr(stderr_text, "only supports the a8 alpha mask format") != NULL, "rgb565 gate error JSON missing a8-only message.");
+  TEST_ASSERT(strstr(stderr_text, "rgb565") != NULL, "rgb565 gate error JSON missing offending format name.");
+  free(stderr_text);
+  stderr_text = NULL;
+
+  /* 显式点名 a4：同样报 CLI 错误（本工具只认 a8）。 */
+  argv_a4[1] = image_path;
+  argv_a4[3] = output_dir;
+  TEST_ASSERT(test_redirect_stderr_begin(stderr_path, &saved_fd), "Could not redirect stderr for the a4 gate test.");
+  exit_code = img2bin_indexqoimask_run_with_executable_path(6, argv_a4, mask_exe);
+  TEST_ASSERT(test_redirect_stderr_end(saved_fd), "Could not restore stderr for the a4 gate test.");
+  TEST_ASSERT(exit_code == 1, "Explicit a4 on the a8-only tool must return exit code 1.");
+
+  /* --formats all：静默滤除到只剩 a8。 */
+  argv_all[1] = image_path;
+  argv_all[3] = output_dir;
+  TEST_ASSERT(img2bin_indexqoimask_run_with_executable_path(6, argv_all, mask_exe) == 0, "--formats all on the a8-only tool must silently keep a8 only.");
+  TEST_ASSERT(img2bin_path_join(output_dir, "mask_a8_indexqoimask_be_1x1.bin", expected_a8, sizeof(expected_a8)), "Could not compose a8 gate output path.");
+  TEST_ASSERT(img2bin_path_join(output_dir, "mask_rgb565_indexqoimask_be_1x1.bin", rejected_rgb565, sizeof(rejected_rgb565)), "Could not compose rgb565 gate output path.");
+  TEST_ASSERT(img2bin_is_regular_file(expected_a8), "--formats all should still emit the a8 output.");
+  TEST_ASSERT(!img2bin_is_regular_file(rejected_rgb565), "--formats all must not emit color formats on the a8-only tool.");
+
+  /* --quantize-bits 在不支持的工具上：报 CLI 错误。 */
+  argv_raw_quantize[1] = image_path;
+  argv_raw_quantize[3] = output_dir;
+  TEST_ASSERT(test_redirect_stderr_begin(stderr_path, &saved_fd), "Could not redirect stderr for the raw quantize gate test.");
+  exit_code = img2bin_raw_run_with_executable_path(6, argv_raw_quantize, raw_exe);
+  TEST_ASSERT(test_redirect_stderr_end(saved_fd), "Could not restore stderr for the raw quantize gate test.");
+  TEST_ASSERT(exit_code == 1, "--quantize-bits on a non-mask tool must return exit code 1.");
+  stderr_text = test_read_text_file(stderr_path);
+  TEST_ASSERT(stderr_text != NULL, "Could not read raw quantize gate error output.");
+  TEST_ASSERT(strstr(stderr_text, "\"code\":\"cli_parse_failed\"") != NULL, "raw quantize gate error JSON missing code.");
+  TEST_ASSERT(strstr(stderr_text, "--quantize-bits") != NULL, "raw quantize gate error JSON missing flag detail.");
+  free(stderr_text);
+  stderr_text = NULL;
+
+  /* 非法档位值（9）：CLI 解析层报错。 */
+  argv_bad_bits[1] = image_path;
+  argv_bad_bits[3] = output_dir;
+  TEST_ASSERT(test_redirect_stderr_begin(stderr_path, &saved_fd), "Could not redirect stderr for the bad-bits gate test.");
+  exit_code = img2bin_indexqoimask_run_with_executable_path(6, argv_bad_bits, mask_exe);
+  TEST_ASSERT(test_redirect_stderr_end(saved_fd), "Could not restore stderr for the bad-bits gate test.");
+  TEST_ASSERT(exit_code == 1, "--quantize-bits 9 must be rejected with exit code 1.");
+  stderr_text = test_read_text_file(stderr_path);
+  TEST_ASSERT(stderr_text != NULL, "Could not read bad-bits gate error output.");
+  TEST_ASSERT(strstr(stderr_text, "Invalid --quantize-bits value") != NULL, "bad-bits gate error JSON missing detail.");
+  free(stderr_text);
+}
+
 static void test_build_roundtrip_pixels(unsigned char *pixels, int width, int height)
 {
   int x = 0;
@@ -2355,6 +2674,22 @@ static void test_decoder_roundtrip_all(void)
         TEST_ASSERT(!img2bin_encode_qoif_image(format, endianness, background, &image, &encoded, &encoded_size, error, sizeof(error)), "QOIF encoder must reject alpha mask formats.");
         TEST_ASSERT(!img2bin_encode_indexqoi_image(format, endianness, background, &image, 0u, &encoded, &encoded_size, error, sizeof(error)), "IndexQOI encoder must reject alpha mask formats.");
 
+        /* indexQOI_MASK 只接受 a8：a8 上 q=8 无损回环（输出与 raw a8 payload
+           逐字节一致），a4/a2/a1 一律拒绝。 */
+        if (format == IMG2BIN_FMT_A8) {
+          unsigned char *mask_encoded = NULL;
+          size_t mask_encoded_size = 0;
+
+          TEST_ASSERT(
+            img2bin_encode_indexqoimask_image(format, endianness, background, &image, 8u, &mask_encoded, &mask_encoded_size, error, sizeof(error)),
+            error);
+          status = img2bin_decode_indexqoimask(mask_encoded, mask_encoded_size, ROUNDTRIP_W, ROUNDTRIP_H, decoded, sizeof(decoded), &decoded_size);
+          test_decoder_expect_roundtrip("indexqoimask-q8", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
+          free(mask_encoded);
+        } else {
+          TEST_ASSERT(!img2bin_encode_indexqoimask_image(format, endianness, background, &image, 8u, &encoded, &encoded_size, error, sizeof(error)), "IndexQOI mask encoder must reject a4/a2/a1.");
+        }
+
         TEST_ASSERT(raw_size + IMG2BIN_RESOURCE_HEADER_SIZE <= sizeof(headered), "Headered alpha fixture is unexpectedly large.");
         TEST_ASSERT(img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_RAW, format, ROUNDTRIP_W, ROUNDTRIP_H, universal), "Could not build the alpha raw resource header.");
         memcpy(headered, universal, IMG2BIN_RESOURCE_HEADER_SIZE);
@@ -2377,6 +2712,9 @@ static void test_decoder_roundtrip_all(void)
       }
 
       TEST_ASSERT(img2bin_encode_raw_image(format, endianness, background, &image, &raw_buffer, &raw_size, error, sizeof(error)), error);
+
+      /* 彩色格式对 indexQOI_MASK 编码器一律非法。 */
+      TEST_ASSERT(!img2bin_encode_indexqoimask_image(format, endianness, background, &image, 8u, &encoded, &encoded_size, error, sizeof(error)), "IndexQOI mask encoder must reject color formats.");
 
       status = img2bin_decode_raw(raw_buffer, raw_size, decode_format, pixel_count, decoded, sizeof(decoded), &decoded_size);
       test_decoder_expect_roundtrip("raw", info, endianness, status, decoded, decoded_size, raw_buffer, raw_size);
@@ -2576,6 +2914,357 @@ static void test_decoder_rejects_damage(void)
   }
 }
 
+/* 测试侧独立实现的量化 + 高位复制扩展，对照解码器输出。 */
+static unsigned char test_indexqoimask_expected_alpha(unsigned char alpha, unsigned int quantize_bits)
+{
+  unsigned char value = (unsigned char)(alpha >> (8u - quantize_bits));
+  unsigned int shift = 8u - quantize_bits;
+
+  if (shift == 0u) {
+    return value;
+  }
+  return (unsigned char)(((unsigned int)value << shift) | ((unsigned int)value >> (quantize_bits - shift)));
+}
+
+/* 索引QOI_MASK 全档位回环：q=5/6/7/8 整图解码 == 逐像素 量化+扩展 的期望；
+   单行随机访问与整图逐行一致；行偏移可查询；文件级自动分发（算法 0x6 + a8）；
+   0x6 与 a4 的组合按损坏流拒绝。 */
+static void test_indexqoimask_decoder_roundtrip(void)
+{
+  enum { MASK_W = 48, MASK_H = 21 };
+  static unsigned char pixels[(size_t)MASK_W * MASK_H * 4u];
+  static unsigned char expected[(size_t)MASK_W * MASK_H];
+  static unsigned char decoded[(size_t)MASK_W * MASK_H];
+  unsigned char row_decoded[MASK_W];
+  const unsigned int depths[4] = { 5u, 6u, 7u, 8u };
+  img2bin_image_t image;
+  img2bin_rgb_t background = { 0, 0, 0 };
+  char error[256];
+  char label[160];
+  size_t depth_index = 0;
+  int x = 0;
+  int y = 0;
+
+  /* 合成蒙版：纯透明/纯实体行（RUN）、渐变（DIFF/DELTA）、噪声（INDEX/ALPHA）、
+     重复行（去重）、台阶、抗锯齿边缘，覆盖全部 op 与行型。 */
+  for (y = 0; y < MASK_H; ++y) {
+    for (x = 0; x < MASK_W; ++x) {
+      unsigned char alpha = 0;
+
+      switch (y % 7) {
+        case 0: alpha = 0; break;
+        case 1: alpha = 255; break;
+        case 2: alpha = (unsigned char)(x * 255 / (MASK_W - 1)); break;
+        case 3: alpha = (unsigned char)((x * 37 + y * 11) & 0xFF); break;
+        case 4: alpha = (unsigned char)((x * 37 + (y - 1) * 11) & 0xFF); break; /* 与上一行相同 */
+        case 5: alpha = (unsigned char)((x / 8) * 32); break;
+        default: alpha = (unsigned char)(x < 24 ? 255 : (x < 32 ? 255 - (x - 24) * 32 : 0)); break;
+      }
+      pixels[((size_t)y * MASK_W + x) * 4u + 0u] = 0xDE;
+      pixels[((size_t)y * MASK_W + x) * 4u + 1u] = 0xAD;
+      pixels[((size_t)y * MASK_W + x) * 4u + 2u] = 0xBE;
+      pixels[((size_t)y * MASK_W + x) * 4u + 3u] = alpha;
+    }
+  }
+  image.width = MASK_W;
+  image.height = MASK_H;
+  image.pixels = pixels;
+
+  for (depth_index = 0; depth_index < 4; ++depth_index) {
+    unsigned int quantize_bits = depths[depth_index];
+    unsigned char *encoded = NULL;
+    size_t encoded_size = 0;
+    size_t decoded_size = 0;
+    size_t row = 0;
+    img2bin_indexqoimask_header_t header;
+    img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
+
+    for (y = 0; y < MASK_H; ++y) {
+      for (x = 0; x < MASK_W; ++x) {
+        expected[(size_t)y * MASK_W + x] =
+          test_indexqoimask_expected_alpha(pixels[((size_t)y * MASK_W + x) * 4u + 3u], quantize_bits);
+      }
+    }
+
+    TEST_ASSERT(
+      img2bin_encode_indexqoimask_image(IMG2BIN_FMT_A8, IMG2BIN_ENDIAN_BIG, background, &image, quantize_bits, &encoded, &encoded_size, error, sizeof(error)),
+      error);
+
+    status = img2bin_decode_indexqoimask_header(encoded, encoded_size, MASK_H, &header);
+    TEST_ASSERT(status == IMG2BIN_DECODE_OK, "IndexQOI mask payload header parse failed.");
+    TEST_ASSERT(header.quantize_bits == quantize_bits, "IndexQOI mask header quantize-bits mismatch.");
+    TEST_ASSERT((size_t)header.u16_count + (size_t)header.u32_count == (size_t)MASK_H, "IndexQOI mask header row-count mismatch.");
+
+    status = img2bin_decode_indexqoimask(encoded, encoded_size, MASK_W, MASK_H, decoded, sizeof(decoded), &decoded_size);
+    snprintf(label, sizeof(label), "indexqoimask q=%u full decode", quantize_bits);
+    if (status != IMG2BIN_DECODE_OK || decoded_size != sizeof(expected)) {
+      fprintf(stderr, "TEST FAILURE: %s status=%d decoded=%zu.\n", label, (int)status, decoded_size);
+      ++g_test_failures;
+    } else {
+      test_expect_bytes(decoded, expected, sizeof(expected), label);
+    }
+
+    /* 单行随机访问必须与整图逐行一致；重复行共享同一偏移。 */
+    for (row = 0; row < (size_t)MASK_H; ++row) {
+      uint32_t offset = 0;
+
+      status = img2bin_decode_indexqoimask_row(encoded, encoded_size, MASK_W, MASK_H, row, row_decoded, sizeof(row_decoded), &decoded_size);
+      snprintf(label, sizeof(label), "indexqoimask q=%u row %u", quantize_bits, (unsigned int)row);
+      if (status != IMG2BIN_DECODE_OK || decoded_size != (size_t)MASK_W) {
+        fprintf(stderr, "TEST FAILURE: %s status=%d decoded=%zu.\n", label, (int)status, decoded_size);
+        ++g_test_failures;
+      } else {
+        test_expect_bytes(row_decoded, expected + row * MASK_W, MASK_W, label);
+      }
+
+      TEST_ASSERT(img2bin_decode_indexqoimask_row_offset(encoded, encoded_size, MASK_H, row, &offset) == IMG2BIN_DECODE_OK, "IndexQOI mask row-offset lookup failed.");
+      TEST_ASSERT(header.stream_offset + (size_t)offset < encoded_size, "IndexQOI mask row offset points outside the payload.");
+    }
+
+    /* 行去重：case 4 行与 case 3 行内容相同，必须共享同一偏移。 */
+    {
+      uint32_t offset_row3 = 0;
+      uint32_t offset_row4 = 0;
+
+      TEST_ASSERT(img2bin_decode_indexqoimask_row_offset(encoded, encoded_size, MASK_H, 3u, &offset_row3) == IMG2BIN_DECODE_OK, "IndexQOI mask dedup offset lookup failed (row 3).");
+      TEST_ASSERT(img2bin_decode_indexqoimask_row_offset(encoded, encoded_size, MASK_H, 4u, &offset_row4) == IMG2BIN_DECODE_OK, "IndexQOI mask dedup offset lookup failed (row 4).");
+      TEST_ASSERT(offset_row3 == offset_row4, "Identical rows must share one stream offset.");
+    }
+
+    /* 文件级自动分发：6 字节通用头（0x6 + a8）+ payload。 */
+    {
+      unsigned char universal[IMG2BIN_RESOURCE_HEADER_SIZE];
+      unsigned char *headered = NULL;
+      img2bin_decode_header_t file_header;
+      size_t headered_size = encoded_size + IMG2BIN_RESOURCE_HEADER_SIZE;
+
+      headered = (unsigned char *)malloc(headered_size);
+      TEST_ASSERT(headered != NULL, "Could not allocate the headered indexqoimask fixture.");
+      TEST_ASSERT(img2bin_build_resource_header(IMG2BIN_HEADER_ALGO_INDEXQOIMASK, IMG2BIN_FMT_A8, MASK_W, MASK_H, universal), "Could not build the indexqoimask resource header.");
+      memcpy(headered, universal, IMG2BIN_RESOURCE_HEADER_SIZE);
+      memcpy(headered + IMG2BIN_RESOURCE_HEADER_SIZE, encoded, encoded_size);
+
+      status = img2bin_decode_image(headered, headered_size, IMG2BIN_DECODE_BIG_ENDIAN, &file_header, decoded, sizeof(decoded), &decoded_size);
+      snprintf(label, sizeof(label), "file-level indexqoimask q=%u", quantize_bits);
+      if (status != IMG2BIN_DECODE_OK || decoded_size != sizeof(expected)) {
+        fprintf(stderr, "TEST FAILURE: %s status=%d decoded=%zu.\n", label, (int)status, decoded_size);
+        ++g_test_failures;
+      } else {
+        test_expect_bytes(decoded, expected, sizeof(expected), label);
+        TEST_ASSERT(file_header.algorithm_nibble == 0x6, "decode_image reported the wrong indexqoimask algorithm nibble.");
+        TEST_ASSERT(file_header.format == IMG2BIN_DECODE_FMT_A8, "decode_image reported the wrong indexqoimask format.");
+      }
+
+      /* 0x6 + a4 是工具不可能产出的组合，按损坏流拒绝。 */
+      headered[1] = (unsigned char)((IMG2BIN_HEADER_ALGO_INDEXQOIMASK << 4) | 0x0Cu);
+      status = img2bin_decode_image(headered, headered_size, IMG2BIN_DECODE_BIG_ENDIAN, NULL, decoded, sizeof(decoded), &decoded_size);
+      TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "indexQOI_MASK with an a4 format nibble must be rejected as corrupt.");
+      free(headered);
+    }
+
+    free(encoded);
+  }
+}
+
+/* u16/u32 行索引分表按行序（不按偏移值）：像素流超过 64 KB 后，即使某行因
+   去重指回小偏移，只要它排在首个大偏移行之后就必须进 u32 表。 */
+static void test_indexqoimask_u32_index_and_row_dedup(void)
+{
+  enum { BIG_W = 200, BIG_H = 250 };
+  unsigned char *pixels = NULL;
+  unsigned char *decoded = NULL;
+  unsigned char *encoded = NULL;
+  size_t encoded_size = 0;
+  size_t decoded_size = 0;
+  img2bin_image_t image;
+  img2bin_rgb_t background = { 0, 0, 0 };
+  img2bin_indexqoimask_header_t header;
+  img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
+  char error[256];
+  uint32_t offset_first = 0;
+  uint32_t offset_last = 0;
+  uint32_t offset_split = 0;
+  int x = 0;
+  int y = 0;
+
+  pixels = (unsigned char *)malloc((size_t)BIG_W * BIG_H * 4u);
+  decoded = (unsigned char *)malloc((size_t)BIG_W * BIG_H);
+  TEST_ASSERT(pixels != NULL && decoded != NULL, "Could not allocate the u32-index fixture.");
+
+  /* 相邻差恒大的噪声，逼出大量 ALPHA/INDEX（约 2 字节/像素），拉长像素流；
+     最后一行复制第 0 行，制造"排在 u32 区、偏移却很小"的去重行。 */
+  for (y = 0; y < BIG_H; ++y) {
+    for (x = 0; x < BIG_W; ++x) {
+      int source_y = (y == BIG_H - 1) ? 0 : y;
+      unsigned char alpha = (unsigned char)((x * 97 + source_y * 53) & 0xFF);
+
+      pixels[((size_t)y * BIG_W + x) * 4u + 0u] = 0x11;
+      pixels[((size_t)y * BIG_W + x) * 4u + 1u] = 0x22;
+      pixels[((size_t)y * BIG_W + x) * 4u + 2u] = 0x33;
+      pixels[((size_t)y * BIG_W + x) * 4u + 3u] = alpha;
+    }
+  }
+  image.width = BIG_W;
+  image.height = BIG_H;
+  image.pixels = pixels;
+
+  TEST_ASSERT(
+    img2bin_encode_indexqoimask_image(IMG2BIN_FMT_A8, IMG2BIN_ENDIAN_BIG, background, &image, 8u, &encoded, &encoded_size, error, sizeof(error)),
+    error);
+
+  status = img2bin_decode_indexqoimask_header(encoded, encoded_size, BIG_H, &header);
+  TEST_ASSERT(status == IMG2BIN_DECODE_OK, "u32-index fixture header parse failed.");
+  TEST_ASSERT(header.u16_count > 0u, "u32-index fixture should keep a u16 prefix.");
+  TEST_ASSERT(header.u16_count < (uint16_t)BIG_H, "u32-index fixture did not overflow into the u32 table.");
+  TEST_ASSERT((size_t)header.u16_count + (size_t)header.u32_count == (size_t)BIG_H, "u32-index fixture table split mismatch.");
+
+  /* m = 偏移 ≤65535 的最长行前缀：分界行偏移必大于 65535。 */
+  TEST_ASSERT(img2bin_decode_indexqoimask_row_offset(encoded, encoded_size, BIG_H, header.u16_count, &offset_split) == IMG2BIN_DECODE_OK, "u32-index split-row offset lookup failed.");
+  TEST_ASSERT(offset_split > 0xFFFFu, "The first u32-table row must have an offset above 65535.");
+
+  /* 最后一行去重指回第 0 行：偏移相等且 ≤65535，却仍位于 u32 表（按行序分表）。 */
+  TEST_ASSERT(img2bin_decode_indexqoimask_row_offset(encoded, encoded_size, BIG_H, 0u, &offset_first) == IMG2BIN_DECODE_OK, "u32-index first-row offset lookup failed.");
+  TEST_ASSERT(img2bin_decode_indexqoimask_row_offset(encoded, encoded_size, BIG_H, (size_t)BIG_H - 1u, &offset_last) == IMG2BIN_DECODE_OK, "u32-index last-row offset lookup failed.");
+  TEST_ASSERT(offset_first == offset_last, "Deduplicated last row must reuse the first row's offset.");
+  TEST_ASSERT(offset_last <= 0xFFFFu, "Deduplicated last row keeps a small offset inside the u32 table.");
+
+  /* 整图回环（q=8 无损：期望值即源 Alpha）。 */
+  status = img2bin_decode_indexqoimask(encoded, encoded_size, BIG_W, BIG_H, decoded, (size_t)BIG_W * BIG_H, &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_OK, "u32-index fixture full decode failed.");
+  TEST_ASSERT(decoded_size == (size_t)BIG_W * BIG_H, "u32-index fixture decode size mismatch.");
+  for (y = 0; y < BIG_H && g_test_failures == 0; ++y) {
+    for (x = 0; x < BIG_W; ++x) {
+      if (decoded[(size_t)y * BIG_W + x] != pixels[((size_t)y * BIG_W + x) * 4u + 3u]) {
+        fprintf(stderr, "TEST FAILURE: u32-index roundtrip differs at (%d,%d).\n", x, y);
+        ++g_test_failures;
+        break;
+      }
+    }
+  }
+
+  free(pixels);
+  free(decoded);
+  free(encoded);
+}
+
+/* 索引QOI_MASK 损坏流拒绝：保留位、行数不符、字典越界、INDEX 越界、
+   DIFF 行尾/越界、RUN 超行宽、行首字节超量化域、截断与多余字节。 */
+static void test_indexqoimask_decoder_rejects_damage(void)
+{
+  /* 4x1、q=6、无字典的黄金 payload（与量化黄金测试相同的流）。 */
+  const unsigned char valid[] = {
+    0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x9E, 0x83, 0x80
+  };
+  unsigned char tampered[64];
+  unsigned char decoded[16];
+  size_t decoded_size = 0;
+  img2bin_indexqoimask_header_t header;
+  img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
+
+  /* 基线必须可解。 */
+  status = img2bin_decode_indexqoimask(valid, sizeof(valid), 4u, 1u, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_OK, "IndexQOI mask damage baseline must decode.");
+
+  /* 标志位保留位（b7..b2）非 0。 */
+  memcpy(tampered, valid, sizeof(valid));
+  tampered[0] = 0x06;
+  status = img2bin_decode_indexqoimask(tampered, sizeof(valid), 4u, 1u, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "Reserved flag bits must be rejected.");
+
+  /* u16+u32 行数与高不符。 */
+  status = img2bin_decode_indexqoimask(valid, sizeof(valid), 4u, 2u, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "Row-count mismatch against the height must be rejected.");
+
+  /* 截断与多余字节。 */
+  status = img2bin_decode_indexqoimask(valid, sizeof(valid) - 1u, 4u, 1u, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_ERR_TRUNCATED, "Truncated IndexQOI mask payload must be rejected.");
+  memcpy(tampered, valid, sizeof(valid));
+  tampered[sizeof(valid)] = 0x55;
+  status = img2bin_decode_indexqoimask(tampered, sizeof(valid) + 1u, 4u, 1u, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_ERR_TRAILING_DATA, "Trailing bytes after the pixel stream must be rejected.");
+
+  /* 空字典却出现 INDEX op。 */
+  memcpy(tampered, valid, sizeof(valid));
+  tampered[9] = 0x00;
+  status = img2bin_decode_indexqoimask(tampered, sizeof(valid), 4u, 1u, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "INDEX beyond the dictionary count must be rejected.");
+
+  /* 字典数量超上限（>64）。 */
+  memcpy(tampered, valid, sizeof(valid));
+  tampered[7] = 65u;
+  status = img2bin_decode_indexqoimask_header(tampered, sizeof(valid), 1u, &header);
+  TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "Dictionary count above 64 must be rejected.");
+
+  /* 字典项超出 q 位域（q=6 的域上限 63）。 */
+  {
+    const unsigned char bad_dict[] = {
+      0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x40, 0x3F
+    };
+    status = img2bin_decode_indexqoimask_header(bad_dict, sizeof(bad_dict), 1u, &header);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "Dictionary entry outside the quantized domain must be rejected.");
+  }
+
+  /* 行首字节超出 q 位域。 */
+  {
+    const unsigned char bad_first[] = {
+      0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40
+    };
+    status = img2bin_decode_indexqoimask(bad_first, sizeof(bad_first), 1u, 1u, decoded, sizeof(decoded), &decoded_size);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "Row-leading byte outside the quantized domain must be rejected.");
+  }
+
+  /* DIFF 产生越界中间值（63 + 3 > 63）。 */
+  {
+    const unsigned char diff_overflow[] = {
+      0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x7C
+    };
+    status = img2bin_decode_indexqoimask(diff_overflow, sizeof(diff_overflow), 3u, 1u, decoded, sizeof(decoded), &decoded_size);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "DIFF overflow beyond the quantized domain must be rejected.");
+  }
+
+  /* 行尾只剩 1 像素时出现 DIFF。 */
+  {
+    const unsigned char diff_at_tail[] = {
+      0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x64
+    };
+    status = img2bin_decode_indexqoimask(diff_at_tail, sizeof(diff_at_tail), 2u, 1u, decoded, sizeof(decoded), &decoded_size);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "DIFF with a single remaining pixel must be rejected.");
+  }
+
+  /* RUN 超出行宽。 */
+  {
+    const unsigned char run_overflow[] = {
+      0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0xC2
+    };
+    status = img2bin_decode_indexqoimask(run_overflow, sizeof(run_overflow), 2u, 1u, decoded, sizeof(decoded), &decoded_size);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "RUN beyond the row width must be rejected.");
+  }
+
+  /* ALPHA 后接字节超出 q 位域。 */
+  {
+    const unsigned char alpha_overflow[] = {
+      0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x40
+    };
+    status = img2bin_decode_indexqoimask(alpha_overflow, sizeof(alpha_overflow), 2u, 1u, decoded, sizeof(decoded), &decoded_size);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_CORRUPT, "ALPHA literal outside the quantized domain must be rejected.");
+  }
+
+  /* 行偏移越界（指向像素流之外）。 */
+  {
+    const unsigned char bad_offset[] = {
+      0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x40, 0x00, 0x3F
+    };
+    status = img2bin_decode_indexqoimask(bad_offset, sizeof(bad_offset), 1u, 1u, decoded, sizeof(decoded), &decoded_size);
+    TEST_ASSERT(status == IMG2BIN_DECODE_ERR_TRUNCATED, "A row offset outside the pixel stream must be rejected.");
+  }
+
+  /* 行号越界与输出缓冲不足。 */
+  status = img2bin_decode_indexqoimask_row(valid, sizeof(valid), 4u, 1u, 1u, decoded, sizeof(decoded), &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_ERR_ARGUMENTS, "Row index beyond the height must be rejected.");
+  status = img2bin_decode_indexqoimask(valid, sizeof(valid), 4u, 1u, decoded, 3u, &decoded_size);
+  TEST_ASSERT(status == IMG2BIN_DECODE_ERR_OUTPUT_TOO_SMALL, "An undersized output buffer must be rejected.");
+}
+
 #ifdef _WIN32
 static void test_windows_icon_resource_for_executable(const char *exe_name)
 {
@@ -2658,6 +3347,8 @@ int main(void)
   test_indexqoi_v2_palette_golden_rgb565();
   test_indexqoi_v2_palette_golden_argb8888();
   test_indexqoi_default_interval_uses_image_width();
+  test_indexqoimask_golden_values();
+  test_indexqoimask_quantize_golden_and_default_bits();
   test_image_loading_for_png_bmp_jpg();
   test_info_json();
   test_imprle_info_json();
@@ -2665,6 +3356,7 @@ int main(void)
   test_qoi_info_json();
   test_qoif_info_json();
   test_indexqoi_info_json();
+  test_indexqoimask_info_json();
   test_default_mode_creates_missing_directories();
   test_cli_default_mode_and_unicode_paths();
   test_error_json_for_invalid_cli();
@@ -2677,9 +3369,14 @@ int main(void)
   test_qoi_cli_and_manifest();
   test_qoif_cli_and_manifest();
   test_indexqoi_cli_and_manifest();
+  test_indexqoimask_cli_and_manifest();
+  test_indexqoimask_format_and_option_gate();
   test_resource_header_golden();
   test_decoder_roundtrip_all();
   test_decoder_rejects_damage();
+  test_indexqoimask_decoder_roundtrip();
+  test_indexqoimask_u32_index_and_row_dedup();
+  test_indexqoimask_decoder_rejects_damage();
 #ifdef _WIN32
   test_windows_icon_resource_for_executable("img2bin_raw.exe");
   test_windows_icon_resource_for_executable("img2bin_imprle.exe");
@@ -2687,12 +3384,14 @@ int main(void)
   test_windows_icon_resource_for_executable("img2bin_qoi.exe");
   test_windows_icon_resource_for_executable("img2bin_qoif.exe");
   test_windows_icon_resource_for_executable("img2bin_indexqoi.exe");
+  test_windows_icon_resource_for_executable("img2bin_indexqoimask.exe");
   test_windows_version_resource_for_executable("img2bin_raw.exe");
   test_windows_version_resource_for_executable("img2bin_imprle.exe");
   test_windows_version_resource_for_executable("img2bin_rle.exe");
   test_windows_version_resource_for_executable("img2bin_qoi.exe");
   test_windows_version_resource_for_executable("img2bin_qoif.exe");
   test_windows_version_resource_for_executable("img2bin_indexqoi.exe");
+  test_windows_version_resource_for_executable("img2bin_indexqoimask.exe");
 #endif
 
   if (g_test_failures != 0) {

@@ -74,6 +74,7 @@ size_t img2bin_format_payload_size(img2bin_pixel_format_t format, unsigned int w
 #define IMG2BIN_HEADER_ALGO_QOI 0x3u
 #define IMG2BIN_HEADER_ALGO_INDEXQOI 0x4u
 #define IMG2BIN_HEADER_ALGO_QOIF 0x5u
+#define IMG2BIN_HEADER_ALGO_INDEXQOIMASK 0x6u
 
 int img2bin_get_format_header_nibble(img2bin_pixel_format_t format);
 int img2bin_build_resource_header(

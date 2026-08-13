@@ -54,7 +54,7 @@ byte2-3 = 宽，恒大端
 byte4-5 = 高，恒大端
 ```
 
-- 本工具算法 nibble：`0x5`（全表：`raw=0x0 rle=0x1 imprle=0x2 qoi=0x3 indexqoi=0x4 qoif=0x5`）
+- 本工具算法 nibble：`0x5`（全表：`raw=0x0 rle=0x1 imprle=0x2 qoi=0x3 indexqoi=0x4 qoif=0x5 indexqoimask=0x6`）
 - 像素格式 nibble：`RGB565=0x0 RGB888=0x1 RGB332=0x4 ARGB8888=0x5 ARGB6666=0x6 ARGB4444=0x7 ARGB8565=0x8 ARGB2222=0x9 RAGB5155=0xA`（`0x2/0x3/0xF` 保留不用）
 
 ## 像素来源与预处理（编码语义）
@@ -86,7 +86,7 @@ byte4-5 = 高，恒大端
 | `rgb332` | 1 | `(R3<<5)|(G3<<2)|B2` | 1 字节 | （编码器不产出） |
 | `ragb5155` | 2 | `(R5<<11)|(A1<<10)|(G5<<5)|B5` 大端 | 不使用 | 2 字节完整像素 |
 
-`a8/a4/a2/a1` 仅 `img2bin_raw` 支持，本工具显式点名会报错（退出码 1）。
+Alpha 蒙版格式（`a8/a4/a2/a1`）由 `img2bin_raw`（全部四种）与 `img2bin_indexqoimask`（仅 `a8`）支持，本工具显式点名会报错（退出码 1）。
 
 ## QOIF 数据流规则
 

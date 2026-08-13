@@ -5,7 +5,7 @@
 当前版本特点：
 
 - 每个 `exe` 对应一种压缩算法
-- 六个取模工具输出 `.bin`：6 字节通用资源头（类型 + 算法/格式码 + 宽高）+ 算法 payload
+- 七个取模工具输出 `.bin`：6 字节通用资源头（类型 + 算法/格式码 + 宽高）+ 算法 payload
 - 默认大端模式
 - 工具默认从 exe 同目录的 `input` 文件夹读取
 - 支持双击运行、拖拽输入和命令行调用
@@ -30,8 +30,9 @@
 | `img2bin_qoi.exe` | 原始 QOI 压缩输出 | [README-img2bin_qoi.md](README-img2bin_qoi.md) |
 | `img2bin_qoif.exe` | 原始 QOI（无字典）压缩输出 | [README-img2bin_qoif.md](README-img2bin_qoif.md) |
 | `img2bin_indexqoi.exe` | 索引 QOI V2（静态调色盘）压缩输出 | [README-img2bin_indexqoi.md](README-img2bin_indexqoi.md) |
+| `img2bin_indexqoimask.exe` | 索引 QOI_MASK 压缩输出（`a8` 蒙版专用，按行随机访问） | [README-img2bin_indexqoimask.md](README-img2bin_indexqoimask.md) |
 
-发布目录中，六个取模工具在 `windows\tools\`。
+发布目录中，七个取模工具在 `windows\tools\`。
 
 ## 默认使用方式
 
@@ -45,7 +46,7 @@
 
 - 输入目录：`<exe_dir>\input`
 - 输出目录：`<exe_dir>\output`
-- 默认像素格式：`RGB565`
+- 默认像素格式：`RGB565`（`img2bin_indexqoimask` 例外，默认 `a8`）
 - 默认字节序：大端
 
 ## 拖拽与命令行
@@ -67,11 +68,12 @@
 
 ## 你最需要先知道的几点
 
-- 六个取模工具只输出 `.bin`（6 字节通用资源头 + payload），不输出结构体文本、数组文本；
+- 七个取模工具只输出 `.bin`（6 字节通用资源头 + payload），不输出结构体文本、数组文本；
   需要 `.c/.h` 数组时可用任意 bin2c 类工具转换（数组内容与 `.bin` 逐字节一致即可）
 - 没有 GUI
 - 若目标格式不带 Alpha，透明区域会先按背景色混合，再转目标格式
 - `img2bin_indexqoi.exe` 默认索引间隔是图片宽度，可用 `--index-interval` 改
+- `img2bin_indexqoimask.exe` 只支持 `a8` 蒙版，默认 6bit 量化，`--quantize-bits 8` 为无损
 - 如果你要自己写解码器，请重点看 [解码编写说明](README-decoder.md) 和 [像素格式说明](README-formats.md)
 
 ## 输出命名规则
@@ -88,6 +90,7 @@
 screen_rgb565_raw_be_36x45.bin
 screen_argb8888_qoi_be_36x45.bin
 screen_argb8888_indexqoi_be_36x45.bin
+icon_a8_indexqoimask_be_48x48.bin
 ```
 
 ## 批处理结果文件
@@ -100,6 +103,7 @@ screen_argb8888_indexqoi_be_36x45.bin
 - `img2bin_qoi-manifest.json`
 - `img2bin_qoif-manifest.json`
 - `img2bin_indexqoi-manifest.json`
+- `img2bin_indexqoimask-manifest.json`
 
 它会记录：
 
@@ -118,7 +122,7 @@ screen_argb8888_indexqoi_be_36x45.bin
 
 ## 输出像素格式
 
-六个工具通用的彩色格式：
+`raw/imprle/rle/qoi/qoif/indexqoi` 六个工具通用的彩色格式：
 
 - `ARGB8888`
 - `ARGB6666`
@@ -130,6 +134,7 @@ screen_argb8888_indexqoi_be_36x45.bin
 - `RGB332`
 - `RAGB5155`
 
-仅 `img2bin_raw` 支持的 Alpha 蒙版格式（只存透明度，GUI 运行时染色）：
+Alpha 蒙版格式（只存透明度，GUI 运行时染色）：
 
-- `A8`、`A4`、`A2`、`A1`
+- `A8`、`A4`、`A2`、`A1`：`img2bin_raw` 全部支持
+- `A8` 另可由 `img2bin_indexqoimask` 压缩输出（该工具仅支持 `a8`）

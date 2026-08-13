@@ -233,6 +233,21 @@ int img2bin_parse_cli(int argc, const char *const *argv, img2bin_cli_options_t *
       options->index_interval_specified = 1;
       continue;
     }
+    if (strcmp(arg, "--quantize-bits") == 0) {
+      unsigned int parsed_bits = 0u;
+
+      if (index + 1 >= argc) {
+        img2bin_set_error(error_buffer, error_buffer_size, "--quantize-bits requires a value of 5, 6, 7 or 8.");
+        return 0;
+      }
+      if (!img2bin_parse_u32_value(argv[++index], &parsed_bits) || parsed_bits < 5u || parsed_bits > 8u) {
+        img2bin_set_error(error_buffer, error_buffer_size, "Invalid --quantize-bits value. Expected 5, 6, 7 or 8.");
+        return 0;
+      }
+      options->quantize_bits = parsed_bits;
+      options->quantize_bits_specified = 1;
+      continue;
+    }
     if (strcmp(arg, "--format") == 0) {
       img2bin_pixel_format_t format;
 
@@ -252,6 +267,7 @@ int img2bin_parse_cli(int argc, const char *const *argv, img2bin_cli_options_t *
       options->formats[0] = format;
       options->format_count = 1;
       has_explicit_single = 1;
+      options->format_specified = 1;
       continue;
     }
     if (strcmp(arg, "--formats") == 0) {
@@ -267,6 +283,7 @@ int img2bin_parse_cli(int argc, const char *const *argv, img2bin_cli_options_t *
         return 0;
       }
       has_explicit_list = 1;
+      options->format_specified = 1;
       continue;
     }
     if (arg[0] != '-') {

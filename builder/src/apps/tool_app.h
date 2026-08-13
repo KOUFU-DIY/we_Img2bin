@@ -35,9 +35,14 @@ typedef struct img2bin_tool_descriptor_s {
   const char *output_token;
   const char *manifest_file_name;
   int supports_index_interval;
-  /* Alpha 蒙版家族（a8/a4/a2/a1）只在 raw 工具开放；为 0 的工具在 CLI、
+  /* --quantize-bits（Alpha 量化位数 5..8）只在 indexQOI_MASK 工具开放。 */
+  int supports_quantize_bits;
+  /* Alpha 蒙版家族（a8/a4/a2/a1）只在 raw 工具全量开放；为 0 的工具在 CLI、
      --info、--list-formats 层面一致地不提供这些格式。 */
   int supports_alpha_only_formats;
+  /* 置 1 的工具只提供/只接受 a8 蒙版格式（indexQOI_MASK 专用）：默认格式
+     变为 a8，其余格式显式点名报 CLI 错误、--formats all 静默滤除。 */
+  int requires_alpha8_format;
   unsigned int header_algorithm_nibble;
   img2bin_tool_encode_fn encode_image;
 } img2bin_tool_descriptor_t;

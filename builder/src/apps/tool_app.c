@@ -145,6 +145,28 @@ static int img2bin_tool_is_valid(const img2bin_tool_descriptor_t *tool)
          tool->encode_image != NULL;
 }
 
+/* 按工具过滤像素格式：a8 专用工具（requires_alpha8_format）只认 a8；
+   其余工具按 Alpha 蒙版开关决定是否提供 a8/a4/a2/a1。CLI 校验、
+   --info、--list-formats 三处共用同一判定，保证机器接口一致。 */
+static int img2bin_tool_supports_format_info(const img2bin_tool_descriptor_t *tool, const img2bin_format_info_t *info)
+{
+  if (info == NULL) {
+    return 0;
+  }
+  if (tool->requires_alpha8_format) {
+    return info->id == IMG2BIN_FMT_A8;
+  }
+  if (info->is_alpha_only && !tool->supports_alpha_only_formats) {
+    return 0;
+  }
+  return 1;
+}
+
+static const char *img2bin_tool_default_format_name(const img2bin_tool_descriptor_t *tool)
+{
+  return tool->requires_alpha8_format ? "a8" : "rgb565";
+}
+
 static void img2bin_processed_image_init(img2bin_processed_image_t *processed)
 {
   if (processed == NULL) {
@@ -729,6 +751,9 @@ static void img2bin_print_help_for_tool(const img2bin_tool_descriptor_t *tool)
   if (tool->supports_index_interval) {
     printf("  --index-interval <count>   Pixel interval for index points. Default is image width.\n");
   }
+  if (tool->supports_quantize_bits) {
+    printf("  --quantize-bits <5|6|7|8>  Alpha quantization depth. 8 is lossless. Default is 6.\n");
+  }
   printf("  --manifest                 Write %s into the output directory (off by default).\n", tool->manifest_file_name);
   printf("  --info                     Print machine-readable tool metadata as JSON.\n");
   printf("  --list-formats             Print supported pixel formats.\n");
@@ -739,7 +764,7 @@ static void img2bin_print_help_for_tool(const img2bin_tool_descriptor_t *tool)
   printf("Default behavior with no arguments:\n");
   printf("  Input directory  : <exe_dir>/input\n");
   printf("  Output directory : <exe_dir>/output\n");
-  printf("  Format           : rgb565\n");
+  printf("  Format           : %s\n", img2bin_tool_default_format_name(tool));
   printf("  Endianness       : big-endian\n");
   printf("  Missing input/output folders will be created automatically.\n");
 }
@@ -792,24 +817,25 @@ int img2bin_tool_get_info_json(const img2bin_tool_descriptor_t *tool, char *buff
         "    \"id\": \"%s\",\n"
         "    \"algorithm_code\": \"%s\",\n"
         "    \"compression\": \"%s\",\n"
-        "    \"supports_multi_format\": true\n"
+        "    \"supports_multi_format\": %s\n"
         "  },\n"
         "  \"defaults\": {\n"
-        "    \"format\": \"rgb565\",\n"
+        "    \"format\": \"%s\",\n"
         "    \"endianness\": \"big\",\n"
         "    \"input_dir\": \"exe_dir/input\",\n"
         "    \"output_dir\": \"exe_dir/output\",\n"
-        "    \"background_color\": \"000000\"%s\n"
+        "    \"background_color\": \"000000\"%s%s\n"
         "  },\n"
         "  \"capabilities\": {\n"
         "    \"input_formats\": [\"png\", \"bmp\", \"jpg\", \"jpeg\"],\n"
         "    \"output_extension\": \"bin\",\n"
         "    \"supports_batch\": true,\n"
         "    \"supports_single_format\": true,\n"
-        "    \"supports_multiple_formats\": true,\n"
+        "    \"supports_multiple_formats\": %s,\n"
         "    \"supports_endianness_switch\": true,\n"
         "    \"supports_bg_color\": true,\n"
         "    \"supports_index_interval\": %s,\n"
+        "    \"supports_quantize_bits\": %s,\n"
         "    \"supports_no_arg_batch\": true,\n"
         "    \"supports_directory_input\": true,\n"
         "    \"supports_file_input\": true,\n"
@@ -831,8 +857,13 @@ int img2bin_tool_get_info_json(const img2bin_tool_descriptor_t *tool, char *buff
         tool->algorithm_id,
         tool->algorithm_code,
         tool->compression,
+        tool->requires_alpha8_format ? "false" : "true",
+        img2bin_tool_default_format_name(tool),
         tool->supports_index_interval ? ",\n    \"index_interval\": \"image_width\"" : "",
-        tool->supports_index_interval ? "true" : "false")) {
+        tool->supports_quantize_bits ? ",\n    \"quantize_bits\": 6" : "",
+        tool->requires_alpha8_format ? "false" : "true",
+        tool->supports_index_interval ? "true" : "false",
+        tool->supports_quantize_bits ? "true" : "false")) {
     return 0;
   }
 
@@ -876,25 +907,30 @@ int img2bin_tool_get_info_json(const img2bin_tool_descriptor_t *tool, char *buff
         0)) {
     return 0;
   }
-  if (!img2bin_append_argument_json(
-        buffer,
-        buffer_size,
-        &current,
-        "format",
-        "--format",
-        "pixel_format_name",
-        1,
-        0,
-        "\"rgb565\"",
-        "[\"formats\"]",
-        "单一格式",
-        "Single Format",
-        "[]",
-        "[]",
-        "null",
-        "null",
-        0)) {
-    return 0;
+  {
+    char default_format_json[32];
+
+    snprintf(default_format_json, sizeof(default_format_json), "\"%s\"", img2bin_tool_default_format_name(tool));
+    if (!img2bin_append_argument_json(
+          buffer,
+          buffer_size,
+          &current,
+          "format",
+          "--format",
+          "pixel_format_name",
+          1,
+          0,
+          default_format_json,
+          "[\"formats\"]",
+          "单一格式",
+          "Single Format",
+          "[]",
+          "[]",
+          "null",
+          "null",
+          0)) {
+      return 0;
+    }
   }
   if (!img2bin_append_argument_json(
         buffer,
@@ -972,6 +1008,28 @@ int img2bin_tool_get_info_json(const img2bin_tool_descriptor_t *tool, char *buff
           "Index Interval",
           "[]",
           "[]",
+          "null",
+          "null",
+          0)) {
+      return 0;
+    }
+  }
+  if (tool->supports_quantize_bits) {
+    if (!img2bin_append_argument_json(
+          buffer,
+          buffer_size,
+          &current,
+          "quantize_bits",
+          "--quantize-bits",
+          "positive_integer",
+          1,
+          0,
+          "6",
+          "[]",
+          "Alpha量化位数",
+          "Alpha Quantization Bits",
+          "[]",
+          "[\"5\", \"6\", \"7\", \"8\"]",
           "null",
           "null",
           0)) {
@@ -1059,14 +1117,14 @@ int img2bin_tool_get_info_json(const img2bin_tool_descriptor_t *tool, char *buff
     size_t emitted = 0;
 
     for (index = 0; index < format_count; ++index) {
-      if (formats[index].is_alpha_only && !tool->supports_alpha_only_formats) {
+      if (!img2bin_tool_supports_format_info(tool, &formats[index])) {
         continue;
       }
       ++supported_count;
     }
 
     for (index = 0; index < format_count; ++index) {
-      if (formats[index].is_alpha_only && !tool->supports_alpha_only_formats) {
+      if (!img2bin_tool_supports_format_info(tool, &formats[index])) {
         continue;
       }
       ++emitted;
@@ -1870,7 +1928,7 @@ int img2bin_tool_run_with_executable_path(
 
     printf("Supported formats:\n");
     for (format_index = 0; format_index < format_count; ++format_index) {
-      if (format_infos[format_index].is_alpha_only && !tool->supports_alpha_only_formats) {
+      if (!img2bin_tool_supports_format_info(tool, &format_infos[format_index])) {
         continue;
       }
       printf("  %s\n", format_infos[format_index].name);
@@ -1894,6 +1952,28 @@ int img2bin_tool_run_with_executable_path(
     return runtime_error.exit_code;
   }
 
+  if (options.quantize_bits_specified && !tool->supports_quantize_bits) {
+    img2bin_runtime_error_t runtime_error;
+
+    img2bin_runtime_error_set(
+      &runtime_error,
+      "cli_parse_failed",
+      IMG2BIN_APP_EXIT_CLI_ERROR,
+      "cli",
+      NULL,
+      "当前工具不支持自定义 Alpha 量化位数。",
+      "This tool does not support a custom alpha quantization depth.",
+      "--quantize-bits is only available for the indexed QOI mask tool.");
+    img2bin_emit_error_json(&runtime_error);
+    return runtime_error.exit_code;
+  }
+
+  /* a8 专用工具：CLI 层默认的 rgb565 在这里换成 a8（用户显式给过格式则不动）。 */
+  if (tool->requires_alpha8_format && !options.format_specified) {
+    options.formats[0] = IMG2BIN_FMT_A8;
+    options.format_count = 1;
+  }
+
   /* 按工具过滤格式：显式点名不支持的格式报 CLI 错误；--formats all 静默滤除。 */
   {
     size_t read_index = 0;
@@ -1902,7 +1982,7 @@ int img2bin_tool_run_with_executable_path(
     for (read_index = 0; read_index < options.format_count; ++read_index) {
       const img2bin_format_info_t *format_info = img2bin_get_format_info(options.formats[read_index]);
 
-      if (format_info != NULL && (!format_info->is_alpha_only || tool->supports_alpha_only_formats)) {
+      if (img2bin_tool_supports_format_info(tool, format_info)) {
         options.formats[write_index] = options.formats[read_index];
         ++write_index;
         continue;
@@ -1911,15 +1991,27 @@ int img2bin_tool_run_with_executable_path(
       if (!options.formats_all) {
         img2bin_runtime_error_t runtime_error;
 
-        img2bin_runtime_error_set(
-          &runtime_error,
-          "cli_parse_failed",
-          IMG2BIN_APP_EXIT_CLI_ERROR,
-          "cli",
-          NULL,
-          "当前工具不支持 Alpha 蒙版格式（a8/a4/a2/a1 仅限 raw 工具）。",
-          "This tool does not support alpha mask formats (a8/a4/a2/a1 are raw-only).",
-          format_info != NULL ? format_info->name : NULL);
+        if (tool->requires_alpha8_format) {
+          img2bin_runtime_error_set(
+            &runtime_error,
+            "cli_parse_failed",
+            IMG2BIN_APP_EXIT_CLI_ERROR,
+            "cli",
+            NULL,
+            "当前工具仅支持 a8 透明度蒙版格式。",
+            "This tool only supports the a8 alpha mask format.",
+            format_info != NULL ? format_info->name : NULL);
+        } else {
+          img2bin_runtime_error_set(
+            &runtime_error,
+            "cli_parse_failed",
+            IMG2BIN_APP_EXIT_CLI_ERROR,
+            "cli",
+            NULL,
+            "当前工具不支持 Alpha 蒙版格式（a8/a4/a2/a1）。",
+            "This tool does not support alpha mask formats (a8/a4/a2/a1).",
+            format_info != NULL ? format_info->name : NULL);
+        }
         img2bin_emit_error_json(&runtime_error);
         return runtime_error.exit_code;
       }

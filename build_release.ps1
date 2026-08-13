@@ -129,7 +129,7 @@ if (!(Test-Path -LiteralPath $ctest)) {
 $versionText = Get-VersionMacroValue -HeaderPath $versionHeader -MacroName 'IMG2BIN_VERSION_TEXT'
 $versionSemver = Get-VersionMacroValue -HeaderPath $versionHeader -MacroName 'IMG2BIN_VERSION_SEMVER'
 
-$toolNames = @('raw', 'imprle', 'rle', 'qoi', 'qoif', 'indexqoi')
+$toolNames = @('raw', 'imprle', 'rle', 'qoi', 'qoif', 'indexqoi', 'indexqoimask')
 
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $tempBuildRoot = Join-Path $env:LOCALAPPDATA 'Temp\img2bin_tools_build_release'

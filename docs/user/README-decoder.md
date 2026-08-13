@@ -11,12 +11,15 @@
 - 发布包中：`decoder\img2bin_decode.c` / `decoder\img2bin_decode.h`
 - 仓库中：`builder/src/decoder/`
 
-覆盖全部六种算法 × 九种彩色像素格式 × 大小端，外加四种 Alpha 蒙版格式
-（`A8/A4/A2/A1`，仅 raw 算法），所有解码函数把压缩流还原为
-RAW 打包像素字节流（与 `img2bin_raw.exe` 输出逐字节一致），并附带
-`indexQOI` 的头解析、索引读取和"从第 N 个索引点开始解码"接口。
-它在测试里对每种组合做"编码 → 解码 → 与 RAW 输出逐字节比对"的回环验证，
-与当前工具的输出保证一致。本页其余内容既是协议说明，也是这份实现的注释。
+覆盖全部七种算法：六种彩色算法 × 九种彩色像素格式 × 大小端，四种 Alpha
+蒙版格式（`A8/A4/A2/A1`，raw 算法），以及 `indexQOI_MASK`（算法 `0x6`，
+仅 `A8`）。所有解码函数把压缩流还原为 RAW 打包像素字节流（与
+`img2bin_raw.exe` 输出逐字节一致；`indexQOI_MASK` 量化档 q<8 时输出为
+量化+高位复制扩展后的 8bit Alpha），并附带 `indexQOI` 的头解析、索引读取、
+"从第 N 个索引点开始解码"接口和 `indexQOI_MASK` 的头解析、行偏移查询、
+按行解码接口。它在测试里对每种组合做"编码 → 解码 → 与期望输出逐字节
+比对"的回环验证，与当前工具的输出保证一致。本页其余内容既是协议说明，
+也是这份实现的注释。
 
 ## 先看结论
 
@@ -25,7 +28,8 @@ RAW 打包像素字节流（与 `img2bin_raw.exe` 输出逐字节一致），并
 1. 先看 [像素格式说明](README-formats.md)
 2. 再看本页的压缩流规则
 3. 如果要做局部跳转解码，再看 `indexQOI`
-4. 对照参考实现 `img2bin_decode.c` 验证理解
+4. 如果要解 `a8` 压缩蒙版（按行随机访问），看 `indexQOI_MASK` 一章
+5. 对照参考实现 `img2bin_decode.c` 验证理解
 
 ## 一、所有算法共同规则
 
@@ -40,7 +44,8 @@ byte2-3 = 宽，恒大端
 byte4-5 = 高，恒大端
 ```
 
-算法 nibble：`raw=0x0 rle=0x1 imprle=0x2 qoi=0x3 indexqoi=0x4 qoif=0x5`；
+算法 nibble：`raw=0x0 rle=0x1 imprle=0x2 qoi=0x3 indexqoi=0x4 qoif=0x5
+indexqoimask=0x6`；
 像素格式 nibble：`RGB565=0x0 RGB888=0x1 RGB332=0x4 ARGB8888=0x5 ARGB6666=0x6
 ARGB4444=0x7 ARGB8565=0x8 ARGB2222=0x9 RAGB5155=0xA A8=0xB A4=0xC A2=0xD A1=0xE`。
 
@@ -100,8 +105,9 @@ payload。本页后续章节描述的都是**去掉通用头之后的 payload**�
 
 ## Alpha 蒙版（A8/A4/A2/A1）的 RAW 解码
 
-Alpha 蒙版只出现在 raw 算法下（头里出现其他算法 nibble 的组合是非法流），
-payload 是**按行打包**的位流而不是逐像素字节组：
+Alpha 蒙版的合法算法组合只有两种：四种格式 × raw（本节），以及
+`A8` × `indexQOI_MASK`（见第十章）；头里出现其他组合是非法流。
+raw 下 payload 是**按行打包**的位流而不是逐像素字节组：
 
 ```text
 行字节数 row_stride = (宽 × bpp + 7) / 8
@@ -522,7 +528,91 @@ cursor = stream_start + offset
 
 解码按像素数“到数即停”，数据流没有尾部结束码。
 
-## 十、当前实现中的关键兼容约定
+## 十、indexQOI_MASK（A8 蒙版，按行随机访问）解码
+
+```text
+indexQOI_MASK = 6字节通用资源头 + 标志位(1B) + u16行索引项数量(2B)
+              + u32行索引项数量(2B) + u16行索引表 + u32行索引表
+              + 字典数量(1B) + 字典 + 像素流
+```
+
+一句话定义：`A8` 蒙版专用的行压缩格式——每行独立编码并有自己的字节偏移
+索引，可以直接跳到任意行流式解码（单行解码 RAM 为 0），并支持 8/7/6/5 bit
+四档量化。它**不属于 QOI op 体系**：tag 用高 2 位判别，只处理单通道 Alpha。
+只与 `A8` 组合（格式码恒 `0x6B`）。
+
+本节偏移量都相对**通用资源头之后**；payload 内多字节字段恒大端，
+无字节序维度。宽 w、高 h 来自通用资源头。
+
+## 1. payload 头
+
+```text
+byte0   = 标志位：b1:b0 量化位数 q（00=8bit 01=7bit 10=6bit 11=5bit），
+          b7..b2 保留恒 0（非 0 视为损坏流）
+byte1-2 = u16 行索引项数量 m，大端
+byte3-4 = u32 行索引项数量，大端（必须等于 h − m，否则损坏流）
+其后    = u16 行索引表（m 项 × 2B）、u32 行索引表（(h−m) 项 × 4B）
+再后    = 字典数量 n（1B，0..64；>64 视为损坏流）、字典（n 项 × 1B）
+最后    = 像素流（基址记为 base）
+```
+
+## 2. 量化域与扩展
+
+流内一切数值——行首字节、字典项、ALPHA 后接字节——均为 q 位域值
+（`v = a >> (8−q)`）。解码输出 8bit 时按高位复制扩展：
+
+```text
+expand(v) = (q == 8) ? v : (v << s) | (v >> (q − s))，s = 8 − q
+```
+
+保证 0→0、满量程→255、无系统偏差。超出 `[0, 2^q − 1]` 的值视为损坏流。
+
+## 3. 行索引
+
+- 每项 = 该行数据相对像素流基址 `base` 的字节偏移
+- 内容完全相同的行只存一份数据（行去重），多行索引可指向同一偏移；
+  **解码任何一行都必须经行索引重新定位，不得假设行间数据连续**
+- 分表按行序：第 r 行在 `r < m` 时查 u16 表第 r 项，否则查 u32 表第 r−m 项
+  （m 是"偏移仍 ≤65535 的最长行前缀"的行数；第 m 行起无论偏移大小都在
+  u32 表——去重后偏移不随行号单调）
+
+## 4. 行解码规则
+
+每行第 1 个字节 = 首像素 q 位域原始值（无 tag），同时初始化 `prev`；
+其后为 tag 流，累计输出满 w 个像素立即结束（无对齐、无结束符）。
+行完全独立：`prev` 不跨行、RUN/DIFF 不跨行。
+
+| tag | 判别 | 语义 |
+| --- | --- | --- |
+| INDEX | `b>>6 == 0` | `prev = 字典[b & 0x3F]`，输出 1 像素；下标 ≥ n 为损坏流 |
+| DIFF | `b>>6 == 1` | `d0=((b>>3)&7)−4，d1=(b&7)−4`；输出 `prev+d0`、`prev+d0+d1` 两个像素，`prev` 取后者；行尾只剩 1 像素时出现 DIFF 为损坏流 |
+| DELTA | `b>>6 == 2` | `prev += (b & 0x3F) − 32`，输出 1 像素 |
+| RUN | `b>>6 == 3` 且 `b != 0xFF` | 复制 `prev` 共 `(b & 0x3F) + 1` 次（1..63） |
+| ALPHA | `b == 0xFF` | 后接 1 字节 q 位域原始值，绝对值直设 `prev`，输出 1 像素 |
+
+伪代码：
+
+```text
+pos  = base + (r < m ? u16[r] : u32[r−m])
+prev = data[pos++]                     ; 输出 expand(prev)
+while 已输出 < w:
+  b = data[pos++]
+  b == 0xFF : prev = data[pos++]                 ; 输出 1 像素
+  b>>6 == 0 : prev = 字典[b & 0x3F]              ; 输出 1 像素
+  b>>6 == 1 : d0 = ((b>>3)&7)−4; d1 = (b&7)−4    ; 输出 prev+d0、prev+d0+d1
+  b>>6 == 2 : prev += (b & 0x3F) − 32            ; 输出 1 像素
+  b>>6 == 3 : 复制 prev（(b & 0x3F) + 1）次
+```
+
+## 5. 参考解码器接口
+
+- `img2bin_decode_indexqoimask_header()`：解析 payload 头（需传入高 h 做行数校验）
+- `img2bin_decode_indexqoimask_row_offset()`：查第 r 行的字节偏移
+- `img2bin_decode_indexqoimask_row()`：按行随机访问，解码单行到 8bit Alpha
+- `img2bin_decode_indexqoimask()`：整图解码（逐行经行索引定位）
+- `img2bin_decode_image()`：文件级接口对算法 `0x6` + `A8` 自动走这条路径
+
+## 十一、当前实现中的关键兼容约定
 
 这些点最容易在不同实现之间产生分歧，建议你直接按这里实现：
 
@@ -533,8 +623,10 @@ cursor = stream_start + offset
   - `indexQOI`（V2）：**只用于 `ARGB8888/ARGB8565`**，非 Alpha 格式全量一律 `0xFF`
 - `indexQOI` 段首只允许 调色盘 op 或 `0xFF`
 - `RGB888` 在当前实现里按工具定义的字节顺序处理
+- `indexQOI_MASK` 与 QOI 家族无关：单通道、tag 高 2 位判别、行内 `0xFF` 是
+  ALPHA 转义而不是"完整像素原始块"；它只与 `A8` 组合
 
-## 十一、推荐的实现顺序
+## 十二、推荐的实现顺序
 
 如果你是第一次写解码器，建议这样做：
 
@@ -543,9 +635,10 @@ cursor = stream_start + offset
 3. 再实现 `IMPRLE`
 4. 再实现 `QOIF`
 5. 再实现 `QOI`
-6. 最后实现 `indexQOI`
+6. 再实现 `indexQOI`
+7. 如需 `a8` 压缩蒙版，最后实现 `indexQOI_MASK`（独立于前六种，也可以单独实现）
 
-## 十二、写解码器时最有用的资料
+## 十三、写解码器时最有用的资料
 
 - [像素格式说明](README-formats.md)
 - [协议与验证说明](README-protocol.md)

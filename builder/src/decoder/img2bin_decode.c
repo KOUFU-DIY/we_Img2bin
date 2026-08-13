@@ -821,7 +821,7 @@ img2bin_decode_status_t img2bin_decode_header(
   if (header.resource_type != IMG2BIN_DECODE_RESOURCE_TYPE_IMAGE) {
     return IMG2BIN_DECODE_ERR_CORRUPT;
   }
-  if (header.algorithm_nibble > (uint8_t)IMG2BIN_DECODE_ALGO_QOIF) {
+  if (header.algorithm_nibble > (uint8_t)IMG2BIN_DECODE_ALGO_INDEXQOIMASK) {
     return IMG2BIN_DECODE_ERR_CORRUPT;
   }
   if (!img2bin_decode_format_from_nibble(header.format_nibble, &header.format)) {
@@ -860,16 +860,22 @@ img2bin_decode_status_t img2bin_decode_image(
   payload_size = input_size - IMG2BIN_DECODE_HEADER_SIZE;
   pixel_count = (size_t)header.width * (size_t)header.height;
 
-  /* Alpha 蒙版家族只有 raw 算法；头里出现其他组合视为损坏流。 */
+  /* Alpha 蒙版家族的合法算法组合：四种格式 × raw、A8 × indexQOI_MASK；
+     头里出现其他组合视为损坏流。 */
   {
     const img2bin_decode_spec_t *spec = img2bin_decode_get_spec(header.format);
 
     if (spec != 0 && spec->is_alpha_only) {
-      if (header.algorithm_nibble != (uint8_t)IMG2BIN_DECODE_ALGO_RAW) {
+      if (header.algorithm_nibble == (uint8_t)IMG2BIN_DECODE_ALGO_RAW) {
+        status = img2bin_decode_raw_alpha(
+          payload, payload_size, header.format, header.width, header.height, output, output_capacity, out_written);
+      } else if (header.algorithm_nibble == (uint8_t)IMG2BIN_DECODE_ALGO_INDEXQOIMASK &&
+                 header.format == IMG2BIN_DECODE_FMT_A8) {
+        status = img2bin_decode_indexqoimask(
+          payload, payload_size, header.width, header.height, output, output_capacity, out_written);
+      } else {
         return IMG2BIN_DECODE_ERR_CORRUPT;
       }
-      status = img2bin_decode_raw_alpha(
-        payload, payload_size, header.format, header.width, header.height, output, output_capacity, out_written);
       if (status == IMG2BIN_DECODE_OK && out_header != 0) {
         *out_header = header;
       }
@@ -903,6 +909,9 @@ img2bin_decode_status_t img2bin_decode_image(
       }
       status = img2bin_decode_indexqoi(payload, payload_size, header.format, endianness, output, output_capacity, out_written);
       break;
+    case IMG2BIN_DECODE_ALGO_INDEXQOIMASK:
+      /* indexQOI_MASK 只与 A8 蒙版组合（A8 已在上面的 Alpha 分支处理）。 */
+      return IMG2BIN_DECODE_ERR_CORRUPT;
     default:
       return IMG2BIN_DECODE_ERR_CORRUPT;
   }
@@ -1153,4 +1162,329 @@ img2bin_decode_status_t img2bin_decode_indexqoi_from_slot(
     output,
     output_capacity,
     out_written);
+}
+
+/* =====================  indexQOI_MASK（算法 0x6，仅 A8）  =====================
+ * payload：[标志位 1B][u16 项数 m 2B][u32 项数 2B][u16 行索引表][u32 行索引表]
+ *          [字典数量 1B][字典][像素流]，多字节字段恒大端。
+ * 行结构：行首 1 字节 = 首像素 q 位域原始值（初始化 prev），其后 tag 流，
+ * 输出满宽度个像素即止。tag 高 2 位判别：
+ *   00 INDEX（6bit 字典下标）  01 DIFF（两个 3bit 差分，2 像素）
+ *   10 DELTA（6bit 差分）      11 RUN（6bit 计数 c∈[0,62]，复制 prev c+1 次）
+ *   0xFF（RUN 计数 63）为 ALPHA 转义：后接 1 字节 q 位域原始值。
+ * 行完全独立（prev 不跨行、RUN/DIFF 不跨行）；DIFF/DELTA 在 q 位域内加减不回绕。
+ */
+
+#define IMG2BIN_INDEXQOIMASK_FIXED_HEADER_SIZE 5u
+
+/* q<8 按高位复制扩展到 8bit：out=(v<<s)|(v>>(q−s))，s=8−q；保证 0→0、满量程→255。 */
+static uint8_t img2bin_decode_indexqoimask_expand(uint8_t value, uint8_t quantize_bits)
+{
+  unsigned int shift = 8u - (unsigned int)quantize_bits;
+
+  if (shift == 0u) {
+    return value;
+  }
+  return (uint8_t)(((unsigned int)value << shift) | ((unsigned int)value >> ((unsigned int)quantize_bits - shift)));
+}
+
+img2bin_decode_status_t img2bin_decode_indexqoimask_header(
+  const uint8_t *input,
+  size_t input_size,
+  uint16_t height,
+  img2bin_indexqoimask_header_t *out_header)
+{
+  img2bin_indexqoimask_header_t header;
+  size_t tables_end = 0u;
+  size_t index = 0u;
+
+  if (input == 0 || out_header == 0 || height == 0u) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
+  if (input_size < IMG2BIN_INDEXQOIMASK_FIXED_HEADER_SIZE) {
+    return IMG2BIN_DECODE_ERR_TRUNCATED;
+  }
+  /* 标志位 b7..b2 保留，必须为 0；b1:b0 量化档位 00=8bit 01=7bit 10=6bit 11=5bit */
+  if ((input[0] & 0xFCu) != 0u) {
+    return IMG2BIN_DECODE_ERR_CORRUPT;
+  }
+  header.quantize_bits = (uint8_t)(8u - (input[0] & 0x03u));
+  header.u16_count = img2bin_decode_unpack_u16(&input[1], IMG2BIN_DECODE_BIG_ENDIAN);
+  header.u32_count = img2bin_decode_unpack_u16(&input[3], IMG2BIN_DECODE_BIG_ENDIAN);
+
+  /* u32 项数必须等于 高 − u16 项数（两表按行序衔接，不按偏移值分表） */
+  if ((size_t)header.u16_count + (size_t)header.u32_count != (size_t)height) {
+    return IMG2BIN_DECODE_ERR_CORRUPT;
+  }
+
+  tables_end = IMG2BIN_INDEXQOIMASK_FIXED_HEADER_SIZE + (size_t)header.u16_count * 2u + (size_t)header.u32_count * 4u;
+  if (tables_end >= input_size) {
+    return IMG2BIN_DECODE_ERR_TRUNCATED;
+  }
+  header.dict_count = input[tables_end];
+  if (header.dict_count > 64u) {
+    return IMG2BIN_DECODE_ERR_CORRUPT;
+  }
+  header.dict_offset = tables_end + 1u;
+  header.stream_offset = header.dict_offset + (size_t)header.dict_count;
+  if (header.stream_offset > input_size) {
+    return IMG2BIN_DECODE_ERR_TRUNCATED;
+  }
+
+  /* 字典项存 q 位域值，超出量化域视为损坏流 */
+  if (header.quantize_bits < 8u) {
+    for (index = 0u; index < (size_t)header.dict_count; ++index) {
+      if ((input[header.dict_offset + index] >> header.quantize_bits) != 0u) {
+        return IMG2BIN_DECODE_ERR_CORRUPT;
+      }
+    }
+  }
+
+  *out_header = header;
+  return IMG2BIN_DECODE_OK;
+}
+
+static uint32_t img2bin_decode_indexqoimask_offset_at(
+  const uint8_t *input,
+  const img2bin_indexqoimask_header_t *header,
+  size_t row)
+{
+  const uint8_t *entry = 0;
+
+  if (row < (size_t)header->u16_count) {
+    entry = input + IMG2BIN_INDEXQOIMASK_FIXED_HEADER_SIZE + row * 2u;
+    return ((uint32_t)entry[0] << 8) | (uint32_t)entry[1];
+  }
+  entry = input + IMG2BIN_INDEXQOIMASK_FIXED_HEADER_SIZE + (size_t)header->u16_count * 2u +
+          (row - (size_t)header->u16_count) * 4u;
+  return ((uint32_t)entry[0] << 24) | ((uint32_t)entry[1] << 16) | ((uint32_t)entry[2] << 8) | (uint32_t)entry[3];
+}
+
+img2bin_decode_status_t img2bin_decode_indexqoimask_row_offset(
+  const uint8_t *input,
+  size_t input_size,
+  uint16_t height,
+  size_t row,
+  uint32_t *out_offset)
+{
+  img2bin_indexqoimask_header_t header;
+  img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
+
+  if (out_offset == 0) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
+  status = img2bin_decode_indexqoimask_header(input, input_size, height, &header);
+  if (status != IMG2BIN_DECODE_OK) {
+    return status;
+  }
+  if (row >= (size_t)height) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
+
+  *out_offset = img2bin_decode_indexqoimask_offset_at(input, &header, row);
+  return IMG2BIN_DECODE_OK;
+}
+
+/* 从像素流内偏移 offset 处解码一行（width 像素）到 output（8bit Alpha）。
+   out_end 返回该行数据在 payload 内的结束位置（供整图解码做多余字节判定）。 */
+static img2bin_decode_status_t img2bin_decode_indexqoimask_row_at(
+  const uint8_t *input,
+  size_t input_size,
+  const img2bin_indexqoimask_header_t *header,
+  uint16_t width,
+  uint32_t offset,
+  uint8_t *output,
+  size_t *out_end)
+{
+  const uint8_t *dict = input + header->dict_offset;
+  uint8_t quantize_bits = header->quantize_bits;
+  unsigned int domain = 1u << quantize_bits;
+  unsigned int prev = 0u;
+  size_t produced = 0u;
+  size_t pos = 0u;
+
+  if ((size_t)offset > input_size - header->stream_offset) {
+    return IMG2BIN_DECODE_ERR_TRUNCATED;
+  }
+  pos = header->stream_offset + (size_t)offset;
+
+  /* 行首字节 = 首像素 q 位域原始值（无 tag），同时初始化 prev */
+  if (pos >= input_size) {
+    return IMG2BIN_DECODE_ERR_TRUNCATED;
+  }
+  prev = input[pos++];
+  if (prev >= domain) {
+    return IMG2BIN_DECODE_ERR_CORRUPT;
+  }
+  output[produced++] = img2bin_decode_indexqoimask_expand((uint8_t)prev, quantize_bits);
+
+  while (produced < (size_t)width) {
+    uint8_t tag = 0u;
+
+    if (pos >= input_size) {
+      return IMG2BIN_DECODE_ERR_TRUNCATED;
+    }
+    tag = input[pos++];
+
+    if (tag == 0xFFu) { /* ALPHA：绝对值直设 */
+      if (pos >= input_size) {
+        return IMG2BIN_DECODE_ERR_TRUNCATED;
+      }
+      prev = input[pos++];
+      if (prev >= domain) {
+        return IMG2BIN_DECODE_ERR_CORRUPT;
+      }
+      output[produced++] = img2bin_decode_indexqoimask_expand((uint8_t)prev, quantize_bits);
+    } else if ((tag & 0xC0u) == 0x00u) { /* INDEX */
+      if ((size_t)tag >= (size_t)header->dict_count) {
+        return IMG2BIN_DECODE_ERR_CORRUPT;
+      }
+      prev = dict[tag];
+      output[produced++] = img2bin_decode_indexqoimask_expand((uint8_t)prev, quantize_bits);
+    } else if ((tag & 0xC0u) == 0x40u) { /* DIFF：2 像素，行尾只剩 1 像素时非法 */
+      int d0 = (int)((tag >> 3) & 0x07u) - 4;
+      int d1 = (int)(tag & 0x07u) - 4;
+      int first = (int)prev + d0;
+      int second = 0;
+
+      if (produced + 2u > (size_t)width) {
+        return IMG2BIN_DECODE_ERR_CORRUPT;
+      }
+      if (first < 0 || first >= (int)domain) {
+        return IMG2BIN_DECODE_ERR_CORRUPT;
+      }
+      second = first + d1;
+      if (second < 0 || second >= (int)domain) {
+        return IMG2BIN_DECODE_ERR_CORRUPT;
+      }
+      output[produced] = img2bin_decode_indexqoimask_expand((uint8_t)first, quantize_bits);
+      output[produced + 1u] = img2bin_decode_indexqoimask_expand((uint8_t)second, quantize_bits);
+      produced += 2u;
+      prev = (unsigned int)second;
+    } else if ((tag & 0xC0u) == 0x80u) { /* DELTA */
+      int value = (int)prev + ((int)(tag & 0x3Fu) - 32);
+
+      if (value < 0 || value >= (int)domain) {
+        return IMG2BIN_DECODE_ERR_CORRUPT;
+      }
+      prev = (unsigned int)value;
+      output[produced++] = img2bin_decode_indexqoimask_expand((uint8_t)prev, quantize_bits);
+    } else { /* RUN：0xC0..0xFE，复制 prev (c+1) 次 */
+      size_t run = (size_t)(tag & 0x3Fu) + 1u;
+      uint8_t expanded = img2bin_decode_indexqoimask_expand((uint8_t)prev, quantize_bits);
+      size_t repeat = 0u;
+
+      if (produced + run > (size_t)width) {
+        return IMG2BIN_DECODE_ERR_CORRUPT;
+      }
+      for (repeat = 0u; repeat < run; ++repeat) {
+        output[produced + repeat] = expanded;
+      }
+      produced += run;
+    }
+  }
+
+  if (out_end != 0) {
+    *out_end = pos;
+  }
+  return IMG2BIN_DECODE_OK;
+}
+
+img2bin_decode_status_t img2bin_decode_indexqoimask_row(
+  const uint8_t *input,
+  size_t input_size,
+  uint16_t width,
+  uint16_t height,
+  size_t row,
+  uint8_t *output,
+  size_t output_capacity,
+  size_t *out_written)
+{
+  img2bin_indexqoimask_header_t header;
+  img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
+
+  if (width == 0u || output == 0 || out_written == 0) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
+
+  *out_written = 0u;
+  status = img2bin_decode_indexqoimask_header(input, input_size, height, &header);
+  if (status != IMG2BIN_DECODE_OK) {
+    return status;
+  }
+  if (row >= (size_t)height) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
+  if ((size_t)width > output_capacity) {
+    return IMG2BIN_DECODE_ERR_OUTPUT_TOO_SMALL;
+  }
+
+  status = img2bin_decode_indexqoimask_row_at(
+    input, input_size, &header, width, img2bin_decode_indexqoimask_offset_at(input, &header, row), output, 0);
+  if (status != IMG2BIN_DECODE_OK) {
+    return status;
+  }
+
+  *out_written = (size_t)width;
+  return IMG2BIN_DECODE_OK;
+}
+
+img2bin_decode_status_t img2bin_decode_indexqoimask(
+  const uint8_t *input,
+  size_t input_size,
+  uint16_t width,
+  uint16_t height,
+  uint8_t *output,
+  size_t output_capacity,
+  size_t *out_written)
+{
+  img2bin_indexqoimask_header_t header;
+  img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
+  size_t expected = 0u;
+  size_t max_end = 0u;
+  size_t row = 0u;
+
+  if (width == 0u || output == 0 || out_written == 0) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
+
+  *out_written = 0u;
+  status = img2bin_decode_indexqoimask_header(input, input_size, height, &header);
+  if (status != IMG2BIN_DECODE_OK) {
+    return status;
+  }
+
+  expected = (size_t)width * (size_t)height;
+  if (expected > output_capacity) {
+    return IMG2BIN_DECODE_ERR_OUTPUT_TOO_SMALL;
+  }
+
+  /* 行去重后行间数据可能共享/乱序：每行都必须经行索引重新定位。 */
+  max_end = header.stream_offset;
+  for (row = 0u; row < (size_t)height; ++row) {
+    size_t row_end = 0u;
+
+    status = img2bin_decode_indexqoimask_row_at(
+      input,
+      input_size,
+      &header,
+      width,
+      img2bin_decode_indexqoimask_offset_at(input, &header, row),
+      output + row * (size_t)width,
+      &row_end);
+    if (status != IMG2BIN_DECODE_OK) {
+      return status;
+    }
+    if (row_end > max_end) {
+      max_end = row_end;
+    }
+  }
+
+  /* 所有行数据的最远末尾之后仍有剩余字节 = 多余数据 */
+  if (max_end < input_size) {
+    return IMG2BIN_DECODE_ERR_TRAILING_DATA;
+  }
+
+  *out_written = expected;
+  return IMG2BIN_DECODE_OK;
 }

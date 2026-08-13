@@ -83,7 +83,7 @@ jobs:
           # 多配置生成器(VS)产物在 bin/Release，单配置生成器(Ninja/Make)在 bin
           $binDir = if (Test-Path 'build/bin/Release') { 'build/bin/Release' } else { 'build/bin' }
           Write-Host "产物目录: $binDir"
-          foreach ($tool in 'raw', 'imprle', 'rle', 'qoi', 'qoif', 'indexqoi') {
+          foreach ($tool in 'raw', 'imprle', 'rle', 'qoi', 'qoif', 'indexqoi', 'indexqoimask') {
             $exe = "$binDir/img2bin_$tool.exe"
             if (!(Test-Path $exe)) { throw "构建产物缺失: $exe" }
             Copy-Item $exe "$root/windows/tools/"
@@ -140,7 +140,7 @@ jobs:
           root="package/$name"
           mkdir -p "$root/macos/tools" "$root/docs/user" "$root/decoder"
 
-          for tool in raw imprle rle qoi qoif indexqoi; do
+          for tool in raw imprle rle qoi qoif indexqoi indexqoimask; do
             bin="build/bin/img2bin_$tool"
             test -f "$bin" || { echo "构建产物缺失: $bin"; exit 1; }
             cp "$bin" "$root/macos/tools/"
@@ -182,7 +182,7 @@ jobs:
           set -euo pipefail
           ls -R artifacts
           cat > notes.md <<'EOF'
-          img2bin 工具集发布包，六个取模 CLI（raw / imprle / rle / qoi / qoif / indexqoi）。
+          img2bin 工具集发布包，七个取模 CLI（raw / imprle / rle / qoi / qoif / indexqoi / indexqoimask）。
 
           | 平台 | 下载 | 说明 |
           | --- | --- | --- |
