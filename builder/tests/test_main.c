@@ -3319,8 +3319,8 @@ static void test_windows_version_resource_for_executable(const char *exe_name)
   TEST_ASSERT(LOWORD(fixed_info->dwFileVersionLS) == IMG2BIN_VERSION_BUILD, "Build version resource mismatch.");
   TEST_ASSERT(VerQueryValueW(info_buffer, L"\\StringFileInfo\\040904E4\\ProductVersion", (LPVOID *)&product_version, &product_version_length) != 0, "Could not query ProductVersion string.");
   TEST_ASSERT(VerQueryValueW(info_buffer, L"\\StringFileInfo\\040904E4\\FileVersion", (LPVOID *)&file_version, &file_version_length) != 0, "Could not query FileVersion string.");
-  TEST_ASSERT(wcscmp(product_version, L"V0.0.1") == 0, "ProductVersion string mismatch.");
-  TEST_ASSERT(wcscmp(file_version, L"0.0.1") == 0, "FileVersion string mismatch.");
+  TEST_ASSERT(wcscmp(product_version, L"V0.1.0") == 0, "ProductVersion string mismatch.");
+  TEST_ASSERT(wcscmp(file_version, L"0.1.0") == 0, "FileVersion string mismatch.");
 
   free(info_buffer);
   free(wide_path);

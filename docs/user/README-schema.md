@@ -27,7 +27,7 @@
 | `schema_version` | string | info JSON 的 schema 版本 |
 | `tool.id` | string | 工具唯一 id，如 `img2bin_raw` |
 | `tool.kind` | string | 固定 `image_converter` |
-| `tool.version` / `tool.version_semver` | string | 如 `V0.0.1` / `0.0.1` |
+| `tool.version` / `tool.version_semver` | string | 如 `V0.1.0` / `0.1.0` |
 | `gui.display_name` / `gui.description` / `gui.gui_category` | object | 均为 `{zh_cn, en}` 双语文本 |
 | `gui.priority` | number | GUI 排序权重，越小越靠前 |
 | `algorithm.id` / `algorithm.algorithm_code` | string | 算法标识；`algorithm_code` 同时是 `input2<code>` 文件夹后缀与输出文件名中的算法段 |
