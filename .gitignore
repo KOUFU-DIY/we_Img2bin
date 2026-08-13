@@ -3,12 +3,6 @@ builder/build/
 builder/build-ninja/
 builder/build-workspace/
 
-# GUI 依赖与构建产物
-builder/gui_tauri/node_modules/
-builder/gui_tauri/dist/
-builder/gui_tauri/src-tauri/target/
-builder/gui_tauri/*.log
-
 # ===== 发布产物 =====
 # 可执行文件与打包目录由 GitHub Actions 编译、经 Releases 分发，不进版本库。
 # 本地 build_release.ps1 仍会照常生成这两个目录，只是不再被跟踪。
