@@ -36,12 +36,6 @@ typedef struct img2bin_qoi_pixel_s {
   int supports_rgb_chunk;
 } img2bin_qoi_pixel_t;
 
-typedef struct img2bin_qoi_index_list_s {
-  size_t count;
-  size_t capacity;
-  size_t *offsets;
-} img2bin_qoi_index_list_t;
-
 static uint8_t img2bin_qoi_quantize_channel(uint8_t value, unsigned int bits)
 {
   unsigned int max_value = (1u << bits) - 1u;
@@ -74,13 +68,6 @@ static void img2bin_qoi_write_u16(uint16_t value, img2bin_endianness_t endiannes
     out[0] = (unsigned char)(value & 0xFFu);
     out[1] = (unsigned char)((value >> 8) & 0xFFu);
   }
-}
-
-static void img2bin_qoi_write_u24_be(size_t value, unsigned char *out)
-{
-  out[0] = (unsigned char)((value >> 16) & 0xFFu);
-  out[1] = (unsigned char)((value >> 8) & 0xFFu);
-  out[2] = (unsigned char)(value & 0xFFu);
 }
 
 static void img2bin_qoi_write_u32_be(size_t value, unsigned char *out)
@@ -391,50 +378,6 @@ static int img2bin_qoi_can_emit_luma(const img2bin_qoi_pixel_t *current, const i
          db_dg >= -8 && db_dg <= 7;
 }
 
-static void img2bin_qoi_index_list_init(img2bin_qoi_index_list_t *list)
-{
-  if (list == NULL) {
-    return;
-  }
-
-  memset(list, 0, sizeof(*list));
-}
-
-static void img2bin_qoi_index_list_free(img2bin_qoi_index_list_t *list)
-{
-  if (list == NULL) {
-    return;
-  }
-
-  free(list->offsets);
-  list->offsets = NULL;
-  list->count = 0;
-  list->capacity = 0;
-}
-
-static int img2bin_qoi_index_list_append(img2bin_qoi_index_list_t *list, size_t offset)
-{
-  size_t *new_offsets = NULL;
-  size_t new_capacity = 0;
-
-  if (list == NULL) {
-    return 0;
-  }
-
-  if (list->count == list->capacity) {
-    new_capacity = list->capacity == 0u ? 64u : list->capacity * 2u;
-    new_offsets = (size_t *)realloc(list->offsets, new_capacity * sizeof(*new_offsets));
-    if (new_offsets == NULL) {
-      return 0;
-    }
-    list->offsets = new_offsets;
-    list->capacity = new_capacity;
-  }
-
-  list->offsets[list->count++] = offset;
-  return 1;
-}
-
 static void img2bin_qoi_emit_run(unsigned char *output, size_t *output_size, size_t *run)
 {
   if (output == NULL || output_size == NULL || run == NULL || *run == 0u) {
@@ -615,22 +558,29 @@ int img2bin_encode_qoif_image(
     error_buffer_size);
 }
 
-/* =====================  indexQOI V2（静态调色盘）  =====================
+/* =====================  indexQOI V3（固定行索引 + 行去重）  =====================
  *
  * payload 布局：
- *   [14字节索引头][u16索引区][u24索引区][u32索引区][调色盘][QOI数据流]
+ *   [14字节索引头][u16行索引表][u32行索引表][调色盘][QOI数据流]
  * 索引头（恒大端）：
- *   [0] 头长度 0x0E（同时是版本标识；V1 为 0x0D）
- *   [1..2] 宽  [3..4] 高  [5..6] 像素索引间隔
- *   [7..8] u16索引区字节数  [9..10] u24区字节数  [11..12] u32区字节数
+ *   [0] 头长度 0x0F（同时是版本标识；V2 的 0x0E、V1 的 0x0D 均不再支持）
+ *   [1..2] 宽  [3..4] 高
+ *   [5..6] m16 = u16 行索引表项数（第 0..m16-1 行；其余行在 u32 表）
+ *   [7..12] 保留恒 0
  *   [13] 调色盘条目数 0..64（0 = 无调色盘）
+ * 行索引项 = 该行数据相对 QOI 数据流起点的字节偏移。内容完全相同的行
+ * （量化打包后整行字节相等）不再重复存储：索引直接指向首次出现行的偏移，
+ * 解码器对去重完全无感知。存储行按行序追加、偏移单调递增，回指只会更小，
+ * 因此 m16 =「前缀内全部偏移 ≤0xFFFF 的最大行数」良定义。
  * 调色盘每项 = 一个完整原始格式像素（含 Alpha，字节序同 0xFF 全量）。
  * 数据流 op：op<条目数 静态查盘；0x40 DIFF；0x80 LUMA；0xC0 RUN；
  *   0xFE 剥透明度全量（仅 ARGB8888/ARGB8565）；0xFF 原始全量。
- * 段首（索引点）只允许 调色盘op 或 0xFF，RUN 不跨段，空降解码自包含。
- * 两遍法选盘：第一遍统计各颜色进盘可省字节，净收益 > 每像素字节数才有
- * 资格；收益降序、同收益按 32 位有符号颜色键 (r<<24)|(g<<16)|(b<<8)|a
- * 降序取前 64，保证选盘结果确定可对拍。
+ * 行自包含：行首 op 只允许 调色盘op 或 0xFF，RUN 不跨行，任意行经索引
+ * 空降解码无需上文；调色盘全局有效、解码中永不修改。
+ * 两遍法选盘与 V2 相同，但只统计存储行（被去重的行不发射 op、不计收益）：
+ * 第一遍统计各颜色进盘可省字节（行首按 0xFF 全量→调色盘 op 计省
+ * pix_size），净收益 > 每像素字节数才有资格；收益降序、同收益按 32 位
+ * 有符号颜色键 (r<<24)|(g<<16)|(b<<8)|a 降序取前 64，输出确定可对拍。
  */
 
 #define IMG2BIN_INDEXQOI_HEADER_SIZE 14u
@@ -744,59 +694,163 @@ static int img2bin_indexqoi_palette_find(const img2bin_indexqoi_palette_t *palet
   return -1;
 }
 
-/* 第一遍：无调色盘模拟 op 分类，统计每个颜色若进盘可省的字节数。
+/* FNV-1a 64 行签名哈希（只作桶索引；相等仍以整行 memcmp 为准）。 */
+static uint64_t img2bin_indexqoi_row_hash(const unsigned char *bytes, size_t size)
+{
+  uint64_t hash = 1469598103934665603ull;
+  size_t index = 0u;
+
+  for (index = 0u; index < size; ++index) {
+    hash ^= (uint64_t)bytes[index];
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
+/* 行去重判定：把整幅图量化打包成行字节，为每行找首次出现的相同行。
+   dedup_src[r] = 首次出现行号（存储行为 -1）。只有存储行进哈希桶——
+   去重行只可能指向存储行。返回 0 = 内存不足。 */
+static int img2bin_indexqoi_dedup_rows(
+  img2bin_pixel_format_t format,
+  img2bin_endianness_t endianness,
+  img2bin_rgb_t background,
+  const img2bin_image_t *image,
+  size_t pix_size,
+  int32_t *dedup_src)
+{
+  size_t width = (size_t)image->width;
+  size_t height = (size_t)image->height;
+  size_t row_bytes = width * pix_size;
+  unsigned char *packed = NULL;
+  uint64_t *hashes = NULL;
+  int32_t *bucket_head = NULL;
+  int32_t *bucket_next = NULL;
+  size_t bucket_cap = 64u;
+  size_t row = 0u;
+  size_t column = 0u;
+  int ok = 0;
+
+  while (bucket_cap < height * 2u) {
+    bucket_cap *= 2u;
+  }
+
+  packed = (unsigned char *)malloc(row_bytes * height);
+  hashes = (uint64_t *)malloc(height * sizeof(*hashes));
+  bucket_head = (int32_t *)malloc(bucket_cap * sizeof(*bucket_head));
+  bucket_next = (int32_t *)malloc(height * sizeof(*bucket_next));
+  if (packed == NULL || hashes == NULL || bucket_head == NULL || bucket_next == NULL) {
+    goto cleanup;
+  }
+  memset(bucket_head, 0xFF, bucket_cap * sizeof(*bucket_head)); /* 全置 -1 */
+
+  for (row = 0u; row < height; ++row) {
+    unsigned char *dst = packed + row * row_bytes;
+    size_t bucket = 0u;
+    int32_t candidate = 0;
+
+    for (column = 0u; column < width; ++column) {
+      const unsigned char *source = image->pixels + ((row * width + column) * 4u);
+      img2bin_rgba_t rgba;
+      img2bin_qoi_pixel_t pixel;
+
+      rgba.r = source[0];
+      rgba.g = source[1];
+      rgba.b = source[2];
+      rgba.a = source[3];
+      img2bin_qoi_make_pixel(format, endianness, background, rgba, &pixel);
+      memcpy(dst + column * pix_size, pixel.full, pix_size);
+    }
+
+    hashes[row] = img2bin_indexqoi_row_hash(dst, row_bytes);
+    dedup_src[row] = -1;
+    bucket = (size_t)hashes[row] & (bucket_cap - 1u);
+    candidate = bucket_head[bucket];
+    while (candidate >= 0) {
+      if (hashes[candidate] == hashes[row] &&
+          memcmp(packed + (size_t)candidate * row_bytes, dst, row_bytes) == 0) {
+        dedup_src[row] = candidate;
+        break;
+      }
+      candidate = bucket_next[candidate];
+    }
+    if (dedup_src[row] < 0) {
+      bucket_next[row] = bucket_head[bucket];
+      bucket_head[bucket] = (int32_t)row;
+    }
+  }
+  ok = 1;
+
+cleanup:
+  free(packed);
+  free(hashes);
+  free(bucket_head);
+  free(bucket_next);
+  return ok;
+}
+
+/* 第一遍：只对存储行做无调色盘 op 分类，统计每个颜色若进盘可省的字节数。
    调色盘替换不改变解码出的像素值，因此这里的分类与第二遍完全一致。 */
 static int img2bin_indexqoi_collect_stats(
   img2bin_pixel_format_t format,
   img2bin_endianness_t endianness,
   img2bin_rgb_t background,
   const img2bin_image_t *image,
-  unsigned int interval,
   const img2bin_qoi_format_spec_t *spec,
+  const int32_t *dedup_src,
   img2bin_indexqoi_stat_map_t *map)
 {
-  img2bin_qoi_pixel_t previous;
-  size_t pixel_count = (size_t)image->width * (size_t)image->height;
-  size_t pixel_index = 0u;
+  size_t width = (size_t)image->width;
+  size_t height = (size_t)image->height;
+  size_t row = 0u;
+  size_t column = 0u;
 
-  img2bin_qoi_make_default_previous(format, endianness, &previous);
+  for (row = 0u; row < height; ++row) {
+    img2bin_qoi_pixel_t previous;
 
-  for (pixel_index = 0u; pixel_index < pixel_count; ++pixel_index) {
-    const unsigned char *source = image->pixels + (pixel_index * 4u);
-    img2bin_rgba_t rgba;
-    img2bin_qoi_pixel_t current;
-
-    rgba.r = source[0];
-    rgba.g = source[1];
-    rgba.b = source[2];
-    rgba.a = source[3];
-    img2bin_qoi_make_pixel(format, endianness, background, rgba, &current);
-
-    if ((pixel_index % (size_t)interval) == 0u) {
-      /* 索引点：0xFF 全量 -> 单字节调色盘 op，省 pix_size */
-      if (!img2bin_indexqoi_stat_map_add(map, img2bin_indexqoi_color_key(&current), current.full_size)) {
-        return 0;
-      }
-    } else if (img2bin_qoi_pixels_equal(&current, &previous)) {
-      /* RUN 像素不查盘，无收益 */
-    } else if (current.a == previous.a && img2bin_qoi_can_emit_diff(&current, &previous)) {
-      /* DIFF 1 字节 -> 1 字节，收益 0，不计 */
-    } else if (current.a == previous.a && img2bin_qoi_can_emit_luma(&current, &previous)) {
-      if (!img2bin_indexqoi_stat_map_add(map, img2bin_indexqoi_color_key(&current), 1u)) {
-        return 0;
-      }
-    } else if (current.a == previous.a && spec->has_alpha && current.supports_rgb_chunk) {
-      /* 0xFE 剥透明度全量 -> 调色盘 op，省 rgb_size（ARGB8888=3 / ARGB8565=2） */
-      if (!img2bin_indexqoi_stat_map_add(map, img2bin_indexqoi_color_key(&current), current.rgb_size)) {
-        return 0;
-      }
-    } else {
-      if (!img2bin_indexqoi_stat_map_add(map, img2bin_indexqoi_color_key(&current), current.full_size)) {
-        return 0;
-      }
+    if (dedup_src[row] >= 0) {
+      continue; /* 去重行不发射任何 op，不计收益 */
     }
+    /* 行自包含：行首像素在下面 column==0 分支必然覆盖 previous，
+       这里的默认初始化只为确定性（消除未初始化告警）。 */
+    img2bin_qoi_make_default_previous(format, endianness, &previous);
 
-    previous = current;
+    for (column = 0u; column < width; ++column) {
+      const unsigned char *source = image->pixels + ((row * width + column) * 4u);
+      img2bin_rgba_t rgba;
+      img2bin_qoi_pixel_t current;
+
+      rgba.r = source[0];
+      rgba.g = source[1];
+      rgba.b = source[2];
+      rgba.a = source[3];
+      img2bin_qoi_make_pixel(format, endianness, background, rgba, &current);
+
+      if (column == 0u) {
+        /* 行首：0xFF 全量 -> 单字节调色盘 op，省 pix_size */
+        if (!img2bin_indexqoi_stat_map_add(map, img2bin_indexqoi_color_key(&current), current.full_size)) {
+          return 0;
+        }
+      } else if (img2bin_qoi_pixels_equal(&current, &previous)) {
+        /* RUN 像素不查盘，无收益 */
+      } else if (current.a == previous.a && img2bin_qoi_can_emit_diff(&current, &previous)) {
+        /* DIFF 1 字节 -> 1 字节，收益 0，不计 */
+      } else if (current.a == previous.a && img2bin_qoi_can_emit_luma(&current, &previous)) {
+        if (!img2bin_indexqoi_stat_map_add(map, img2bin_indexqoi_color_key(&current), 1u)) {
+          return 0;
+        }
+      } else if (current.a == previous.a && spec->has_alpha && current.supports_rgb_chunk) {
+        /* 0xFE 剥透明度全量 -> 调色盘 op，省 rgb_size（ARGB8888=3 / ARGB8565=2） */
+        if (!img2bin_indexqoi_stat_map_add(map, img2bin_indexqoi_color_key(&current), current.rgb_size)) {
+          return 0;
+        }
+      } else {
+        if (!img2bin_indexqoi_stat_map_add(map, img2bin_indexqoi_color_key(&current), current.full_size)) {
+          return 0;
+        }
+      }
+
+      previous = current;
+    }
   }
 
   return 1;
@@ -851,27 +905,29 @@ static int img2bin_indexqoi_build_palette(
   return 1;
 }
 
-/* 第二遍：带调色盘正式编码 QOI 数据流，并记录索引点偏移。 */
+/* 第二遍：带调色盘逐存储行编码 QOI 数据流，并记录每行偏移。
+   去重行不产出任何字节，直接复用首次出现行的偏移。 */
 static int img2bin_encode_indexqoi_stream(
   img2bin_pixel_format_t format,
   img2bin_endianness_t endianness,
   img2bin_rgb_t background,
   const img2bin_image_t *image,
-  unsigned int interval,
   const img2bin_indexqoi_palette_t *palette,
-  img2bin_qoi_index_list_t *index_list,
+  const int32_t *dedup_src,
+  size_t *row_offsets,
   unsigned char **out_stream,
   size_t *out_stream_size,
   char *error_buffer,
   size_t error_buffer_size)
 {
   img2bin_qoi_format_spec_t spec;
-  img2bin_qoi_pixel_t previous;
-  size_t pixel_count = (size_t)image->width * (size_t)image->height;
+  size_t width = (size_t)image->width;
+  size_t height = (size_t)image->height;
+  size_t pixel_count = width * height;
   unsigned char *output = NULL;
   size_t output_size = 0u;
-  size_t pixel_index = 0u;
-  size_t run = 0u;
+  size_t row = 0u;
+  size_t column = 0u;
 
   img2bin_qoi_get_format_spec(format, &spec);
 
@@ -885,85 +941,90 @@ static int img2bin_encode_indexqoi_stream(
     return 0;
   }
 
-  img2bin_qoi_make_default_previous(format, endianness, &previous);
+  for (row = 0u; row < height; ++row) {
+    img2bin_qoi_pixel_t previous;
+    size_t run = 0u;
 
-  for (pixel_index = 0u; pixel_index < pixel_count; ++pixel_index) {
-    const unsigned char *source = image->pixels + (pixel_index * 4u);
-    img2bin_rgba_t rgba;
-    img2bin_qoi_pixel_t current;
-    int palette_slot = -1;
+    if (dedup_src[row] >= 0) {
+      row_offsets[row] = row_offsets[dedup_src[row]];
+      continue;
+    }
+    row_offsets[row] = output_size;
+    /* 行首像素在 column==0 分支必然覆盖 previous，默认初始化只为确定性。 */
+    img2bin_qoi_make_default_previous(format, endianness, &previous);
 
-    rgba.r = source[0];
-    rgba.g = source[1];
-    rgba.b = source[2];
-    rgba.a = source[3];
-    img2bin_qoi_make_pixel(format, endianness, background, rgba, &current);
+    for (column = 0u; column < width; ++column) {
+      const unsigned char *source = image->pixels + ((row * width + column) * 4u);
+      img2bin_rgba_t rgba;
+      img2bin_qoi_pixel_t current;
+      int palette_slot = -1;
 
-    if ((pixel_index % (size_t)interval) == 0u) {
-      /* 段首：先强制结束 RUN（RUN 不跨段），op 只允许 调色盘op 或 0xFF 全量 */
-      img2bin_qoi_emit_run(output, &output_size, &run);
-      if (!img2bin_qoi_index_list_append(index_list, output_size)) {
-        free(output);
-        img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding indexed QOI image.");
-        return 0;
+      rgba.r = source[0];
+      rgba.g = source[1];
+      rgba.b = source[2];
+      rgba.a = source[3];
+      img2bin_qoi_make_pixel(format, endianness, background, rgba, &current);
+
+      if (column == 0u) {
+        /* 行首：op 只允许 调色盘op 或 0xFF 全量（行自包含，无需上文） */
+        palette_slot = img2bin_indexqoi_palette_find(palette, img2bin_indexqoi_color_key(&current));
+        if (palette_slot >= 0) {
+          output[output_size++] = (unsigned char)palette_slot;
+        } else {
+          output[output_size++] = IMG2BIN_QOI_OP_RGBA;
+          memcpy(output + output_size, current.full, current.full_size);
+          output_size += current.full_size;
+        }
+        previous = current;
+        continue;
       }
+
+      if (img2bin_qoi_pixels_equal(&current, &previous)) {
+        ++run;
+        if (run == IMG2BIN_QOI_RUN_MAX || column + 1u == width) {
+          img2bin_qoi_emit_run(output, &output_size, &run); /* RUN 不跨行 */
+        }
+        continue;
+      }
+
+      img2bin_qoi_emit_run(output, &output_size, &run);
+
       palette_slot = img2bin_indexqoi_palette_find(palette, img2bin_indexqoi_color_key(&current));
       if (palette_slot >= 0) {
+        /* 盘命中出单字节 op，不区分透明度是否变化 */
         output[output_size++] = (unsigned char)palette_slot;
+      } else if (current.a == previous.a && img2bin_qoi_can_emit_diff(&current, &previous)) {
+        int dr = (int)current.r - (int)previous.r;
+        int dg = (int)current.g - (int)previous.g;
+        int db = (int)current.b - (int)previous.b;
+
+        output[output_size++] = (unsigned char)(
+          IMG2BIN_QOI_OP_DIFF |
+          (unsigned char)((dr + 2) << 4) |
+          (unsigned char)((dg + 2) << 2) |
+          (unsigned char)(db + 2));
+      } else if (current.a == previous.a && img2bin_qoi_can_emit_luma(&current, &previous)) {
+        int dr = (int)current.r - (int)previous.r;
+        int dg = (int)current.g - (int)previous.g;
+        int db = (int)current.b - (int)previous.b;
+        int dr_dg = dr - dg;
+        int db_dg = db - dg;
+
+        output[output_size++] = (unsigned char)(IMG2BIN_QOI_OP_LUMA | (unsigned char)(dg + 32));
+        output[output_size++] = (unsigned char)(((dr_dg + 8) << 4) | (db_dg + 8));
+      } else if (current.a == previous.a && spec.has_alpha && current.supports_rgb_chunk) {
+        /* 0xFE 只用于 ARGB8888/ARGB8565：透明度沿用前像素 */
+        output[output_size++] = IMG2BIN_QOI_OP_RGB;
+        memcpy(output + output_size, current.rgb, current.rgb_size);
+        output_size += current.rgb_size;
       } else {
         output[output_size++] = IMG2BIN_QOI_OP_RGBA;
         memcpy(output + output_size, current.full, current.full_size);
         output_size += current.full_size;
       }
+
       previous = current;
-      continue;
     }
-
-    if (img2bin_qoi_pixels_equal(&current, &previous)) {
-      ++run;
-      if (run == IMG2BIN_QOI_RUN_MAX || pixel_index + 1u == pixel_count) {
-        img2bin_qoi_emit_run(output, &output_size, &run);
-      }
-      continue;
-    }
-
-    img2bin_qoi_emit_run(output, &output_size, &run);
-
-    palette_slot = img2bin_indexqoi_palette_find(palette, img2bin_indexqoi_color_key(&current));
-    if (palette_slot >= 0) {
-      /* 盘命中出单字节 op，不区分透明度是否变化 */
-      output[output_size++] = (unsigned char)palette_slot;
-    } else if (current.a == previous.a && img2bin_qoi_can_emit_diff(&current, &previous)) {
-      int dr = (int)current.r - (int)previous.r;
-      int dg = (int)current.g - (int)previous.g;
-      int db = (int)current.b - (int)previous.b;
-
-      output[output_size++] = (unsigned char)(
-        IMG2BIN_QOI_OP_DIFF |
-        (unsigned char)((dr + 2) << 4) |
-        (unsigned char)((dg + 2) << 2) |
-        (unsigned char)(db + 2));
-    } else if (current.a == previous.a && img2bin_qoi_can_emit_luma(&current, &previous)) {
-      int dr = (int)current.r - (int)previous.r;
-      int dg = (int)current.g - (int)previous.g;
-      int db = (int)current.b - (int)previous.b;
-      int dr_dg = dr - dg;
-      int db_dg = db - dg;
-
-      output[output_size++] = (unsigned char)(IMG2BIN_QOI_OP_LUMA | (unsigned char)(dg + 32));
-      output[output_size++] = (unsigned char)(((dr_dg + 8) << 4) | (db_dg + 8));
-    } else if (current.a == previous.a && spec.has_alpha && current.supports_rgb_chunk) {
-      /* V2 的 0xFE 只用于 ARGB8888/ARGB8565：透明度沿用前像素 */
-      output[output_size++] = IMG2BIN_QOI_OP_RGB;
-      memcpy(output + output_size, current.rgb, current.rgb_size);
-      output_size += current.rgb_size;
-    } else {
-      output[output_size++] = IMG2BIN_QOI_OP_RGBA;
-      memcpy(output + output_size, current.full, current.full_size);
-      output_size += current.full_size;
-    }
-
-    previous = current;
   }
 
   *out_stream = output;
@@ -976,7 +1037,6 @@ int img2bin_encode_indexqoi_image(
   img2bin_endianness_t endianness,
   img2bin_rgb_t background,
   const img2bin_image_t *image,
-  unsigned int index_interval,
   unsigned char **out_buffer,
   size_t *out_size,
   char *error_buffer,
@@ -985,14 +1045,15 @@ int img2bin_encode_indexqoi_image(
   img2bin_qoi_format_spec_t spec;
   img2bin_indexqoi_stat_map_t stat_map;
   img2bin_indexqoi_palette_t palette;
-  img2bin_qoi_index_list_t index_list;
   const img2bin_format_info_t *info = NULL;
-  unsigned int effective_interval = 0u;
+  int32_t *dedup_src = NULL;
+  size_t *row_offsets = NULL;
   unsigned char *payload = NULL;
   size_t payload_size = 0u;
+  size_t height = 0u;
   size_t palette_bytes = 0u;
+  size_t u16_rows = 0u;
   size_t u16_bytes = 0u;
-  size_t u24_bytes = 0u;
   size_t u32_bytes = 0u;
   size_t total_size = 0u;
   unsigned char *output = NULL;
@@ -1014,15 +1075,26 @@ int img2bin_encode_indexqoi_image(
     return 0;
   }
 
-  effective_interval = index_interval == 0u ? (unsigned int)image->width : index_interval;
-  if (effective_interval == 0u || effective_interval > 0xFFFFu) {
-    img2bin_set_error(error_buffer, error_buffer_size, "Indexed QOI interval must be in the range 1..65535.");
-    return 0;
-  }
-
   info = img2bin_get_format_info(format);
   if (info == NULL || !img2bin_qoi_get_format_spec(format, &spec)) {
     img2bin_set_error(error_buffer, error_buffer_size, "Unsupported indexed QOI format.");
+    return 0;
+  }
+
+  height = (size_t)image->height;
+  dedup_src = (int32_t *)malloc(height * sizeof(*dedup_src));
+  row_offsets = (size_t *)malloc(height * sizeof(*row_offsets));
+  if (dedup_src == NULL || row_offsets == NULL) {
+    free(dedup_src);
+    free(row_offsets);
+    img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding indexed QOI image.");
+    return 0;
+  }
+
+  if (!img2bin_indexqoi_dedup_rows(format, endianness, background, image, info->bytes_per_pixel, dedup_src)) {
+    free(dedup_src);
+    free(row_offsets);
+    img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding indexed QOI image.");
     return 0;
   }
 
@@ -1030,130 +1102,96 @@ int img2bin_encode_indexqoi_image(
   stat_map.used = 0u;
   stat_map.slots = (img2bin_indexqoi_stat_t *)calloc(stat_map.capacity, sizeof(*stat_map.slots));
   if (stat_map.slots == NULL) {
+    free(dedup_src);
+    free(row_offsets);
     img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding indexed QOI image.");
     return 0;
   }
 
-  if (!img2bin_indexqoi_collect_stats(format, endianness, background, image, effective_interval, &spec, &stat_map)) {
+  if (!img2bin_indexqoi_collect_stats(format, endianness, background, image, &spec, dedup_src, &stat_map)) {
     free(stat_map.slots);
+    free(dedup_src);
+    free(row_offsets);
     img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding indexed QOI image.");
     return 0;
   }
 
   if (!img2bin_indexqoi_build_palette(&stat_map, format, endianness, info->bytes_per_pixel, &palette)) {
     free(stat_map.slots);
+    free(dedup_src);
+    free(row_offsets);
     img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while encoding indexed QOI image.");
     return 0;
   }
   free(stat_map.slots);
   stat_map.slots = NULL;
 
-  img2bin_qoi_index_list_init(&index_list);
   if (!img2bin_encode_indexqoi_stream(
         format,
         endianness,
         background,
         image,
-        effective_interval,
         &palette,
-        &index_list,
+        dedup_src,
+        row_offsets,
         &payload,
         &payload_size,
         error_buffer,
         error_buffer_size)) {
-    img2bin_qoi_index_list_free(&index_list);
+    free(dedup_src);
+    free(row_offsets);
     return 0;
   }
+  free(dedup_src);
+  dedup_src = NULL;
 
-  for (index = 0u; index < index_list.count; ++index) {
-    size_t offset = index_list.offsets[index];
-
-    if (offset <= 0xFFFFu) {
-      if (u16_bytes > SIZE_MAX - 2u) {
-        free(payload);
-        img2bin_qoi_index_list_free(&index_list);
-        img2bin_set_error(error_buffer, error_buffer_size, "Indexed QOI offset table would be too large.");
-        return 0;
-      }
-      u16_bytes += 2u;
-    } else if (offset <= 0xFFFFFFu) {
-      if (u24_bytes > SIZE_MAX - 3u) {
-        free(payload);
-        img2bin_qoi_index_list_free(&index_list);
-        img2bin_set_error(error_buffer, error_buffer_size, "Indexed QOI offset table would be too large.");
-        return 0;
-      }
-      u24_bytes += 3u;
-    } else if (offset <= 0xFFFFFFFFu) {
-      if (u32_bytes > SIZE_MAX - 4u) {
-        free(payload);
-        img2bin_qoi_index_list_free(&index_list);
-        img2bin_set_error(error_buffer, error_buffer_size, "Indexed QOI offset table would be too large.");
-        return 0;
-      }
-      u32_bytes += 4u;
-    } else {
+  /* 前缀拆分：m16 = 前缀内全部偏移 ≤0xFFFF 的最大行数，其余行走 u32 表。 */
+  while (u16_rows < height && row_offsets[u16_rows] <= 0xFFFFu) {
+    ++u16_rows;
+  }
+  for (index = u16_rows; index < height; ++index) {
+    if (row_offsets[index] > 0xFFFFFFFFu) {
       free(payload);
-      img2bin_qoi_index_list_free(&index_list);
+      free(row_offsets);
       img2bin_set_error(error_buffer, error_buffer_size, "Indexed QOI offset exceeded 32-bit addressable range.");
       return 0;
     }
   }
-
-  if (u16_bytes > 0xFFFFu || u24_bytes > 0xFFFFu || u32_bytes > 0xFFFFu) {
-    free(payload);
-    img2bin_qoi_index_list_free(&index_list);
-    img2bin_set_error(error_buffer, error_buffer_size, "Indexed QOI index-table byte lengths must fit in 16-bit header fields.");
-    return 0;
-  }
+  u16_bytes = u16_rows * 2u;
+  u32_bytes = (height - u16_rows) * 4u;
 
   palette_bytes = palette.count * info->bytes_per_pixel;
-  if (payload_size > SIZE_MAX - (IMG2BIN_INDEXQOI_HEADER_SIZE + u16_bytes + u24_bytes + u32_bytes + palette_bytes)) {
+  if (payload_size > SIZE_MAX - (IMG2BIN_INDEXQOI_HEADER_SIZE + u16_bytes + u32_bytes + palette_bytes)) {
     free(payload);
-    img2bin_qoi_index_list_free(&index_list);
+    free(row_offsets);
     img2bin_set_error(error_buffer, error_buffer_size, "Indexed QOI output would be too large.");
     return 0;
   }
 
-  total_size = IMG2BIN_INDEXQOI_HEADER_SIZE + u16_bytes + u24_bytes + u32_bytes + palette_bytes + payload_size;
+  total_size = IMG2BIN_INDEXQOI_HEADER_SIZE + u16_bytes + u32_bytes + palette_bytes + payload_size;
   output = (unsigned char *)malloc(total_size > 0u ? total_size : 1u);
   if (output == NULL) {
     free(payload);
-    img2bin_qoi_index_list_free(&index_list);
+    free(row_offsets);
     img2bin_set_error(error_buffer, error_buffer_size, "Out of memory while building indexed QOI output.");
     return 0;
   }
 
-  output[0] = (unsigned char)IMG2BIN_INDEXQOI_HEADER_SIZE;
+  output[0] = 0x0Fu; /* V3 头长度兼版本标识 */
   img2bin_qoi_write_u16((uint16_t)image->width, IMG2BIN_ENDIAN_BIG, &output[1]);
   img2bin_qoi_write_u16((uint16_t)image->height, IMG2BIN_ENDIAN_BIG, &output[3]);
-  img2bin_qoi_write_u16((uint16_t)effective_interval, IMG2BIN_ENDIAN_BIG, &output[5]);
-  img2bin_qoi_write_u16((uint16_t)u16_bytes, IMG2BIN_ENDIAN_BIG, &output[7]);
-  img2bin_qoi_write_u16((uint16_t)u24_bytes, IMG2BIN_ENDIAN_BIG, &output[9]);
-  img2bin_qoi_write_u16((uint16_t)u32_bytes, IMG2BIN_ENDIAN_BIG, &output[11]);
+  img2bin_qoi_write_u16((uint16_t)u16_rows, IMG2BIN_ENDIAN_BIG, &output[5]);
+  memset(&output[7], 0, 6u); /* [7..12] 保留恒 0 */
   output[13] = (unsigned char)palette.count;
 
   cursor = output + IMG2BIN_INDEXQOI_HEADER_SIZE;
-  for (index = 0u; index < index_list.count; ++index) {
-    size_t offset = index_list.offsets[index];
-    if (offset <= 0xFFFFu) {
-      img2bin_qoi_write_u16((uint16_t)offset, IMG2BIN_ENDIAN_BIG, cursor);
-      cursor += 2u;
-    }
+  for (index = 0u; index < u16_rows; ++index) {
+    img2bin_qoi_write_u16((uint16_t)row_offsets[index], IMG2BIN_ENDIAN_BIG, cursor);
+    cursor += 2u;
   }
-  for (index = 0u; index < index_list.count; ++index) {
-    size_t offset = index_list.offsets[index];
-    if (offset > 0xFFFFu && offset <= 0xFFFFFFu) {
-      img2bin_qoi_write_u24_be(offset, cursor);
-      cursor += 3u;
-    }
-  }
-  for (index = 0u; index < index_list.count; ++index) {
-    size_t offset = index_list.offsets[index];
-    if (offset > 0xFFFFFFu) {
-      img2bin_qoi_write_u32_be(offset, cursor);
-      cursor += 4u;
-    }
+  for (index = u16_rows; index < height; ++index) {
+    img2bin_qoi_write_u32_be(row_offsets[index], cursor);
+    cursor += 4u;
   }
 
   for (index = 0u; index < palette.count; ++index) {
@@ -1164,7 +1202,7 @@ int img2bin_encode_indexqoi_image(
   memcpy(cursor, payload, payload_size);
 
   free(payload);
-  img2bin_qoi_index_list_free(&index_list);
+  free(row_offsets);
   *out_buffer = output;
   *out_size = total_size;
   return 1;

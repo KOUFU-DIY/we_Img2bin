@@ -63,7 +63,7 @@
 ```powershell
 .\img2bin_raw.exe --format rgb565
 .\img2bin_qoi.exe --input .\demo.png --output .\out --format argb8888
-.\img2bin_indexqoi.exe --formats all --index-interval 512
+.\img2bin_indexqoi.exe --formats all
 ```
 
 ## 你最需要先知道的几点
@@ -72,7 +72,7 @@
   需要 `.c/.h` 数组时可用任意 bin2c 类工具转换（数组内容与 `.bin` 逐字节一致即可）
 - 没有 GUI
 - 若目标格式不带 Alpha，透明区域会先按背景色混合，再转目标格式
-- `img2bin_indexqoi.exe` 默认索引间隔是图片宽度，可用 `--index-interval` 改
+- `img2bin_indexqoi.exe`（V3）固定按行索引并自动做行去重，无间隔参数
 - `img2bin_indexqoimask.exe` 只支持 `a8` 蒙版，默认 6bit 量化，`--quantize-bits 8` 为无损
 - 如果你要自己写解码器，请重点看 [解码编写说明](README-decoder.md) 和 [像素格式说明](README-formats.md)
 

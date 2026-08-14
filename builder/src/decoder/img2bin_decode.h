@@ -8,8 +8,8 @@
  *   - 文件级接口（推荐）：img2bin_decode_header / img2bin_decode_image /
  *     img2bin_decode_image_from_slot，输入整个 .bin 文件，按头自动分发。
  *   - payload 级接口：img2bin_decode_raw/rle/imprle/qoi/qoif/indexqoi*，
- *     输入去掉 6 字节通用头后的裸流（indexQOI V2 裸流自带 14 字节索引头，
- *     后随 u16/u24/u32 索引区、静态调色盘与 QOI 数据流，无尾部结束码）；
+ *     输入去掉 6 字节通用头后的裸流（indexQOI V3 裸流自带 14 字节索引头，
+ *     后随 u16/u32 行索引表、静态调色盘与 QOI 数据流，无尾部结束码）；
  *     Alpha 蒙版格式（A8/A4/A2/A1，raw 算法）走 img2bin_decode_raw_alpha；
  *     indexQOI_MASK（算法 0x6，仅 A8）走 img2bin_decode_indexqoimask*。
  *
@@ -88,20 +88,22 @@ typedef struct img2bin_decode_header_s {
   uint16_t height;
 } img2bin_decode_header_t;
 
-/* indexQOI V2（静态调色盘）索引头，14 字节（[0]=0x0E 兼作版本标识，V1 的
-   0x0D 会被判为损坏流）。调色盘紧跟三个索引区之后，每项一个完整原始格式
-   像素（含 Alpha，字节序同 0xFF 全量像素）；QOI 数据流起点 =
-   palette_offset + palette_count × bytes_per_pixel，数据流无尾部结束码。 */
+/* indexQOI V3（固定行索引 + 行去重）索引头，14 字节（[0]=0x0F 兼作版本
+   标识，V2 的 0x0E 与 V1 的 0x0D 均判为损坏流；[7..12] 保留恒 0）。
+   每行一个索引项 = 该行数据相对 QOI 数据流起点的字节偏移：第 r 行在
+   r < u16_rows 时查 u16 表第 r 项，否则查 u32 表第 r−u16_rows 项；内容
+   相同的行共享同一偏移（行去重，偏移不随行号单调）。调色盘紧跟两张行
+   索引表之后，每项一个完整原始格式像素（含 Alpha，字节序同 0xFF 全量
+   像素）；QOI 数据流起点 = palette_offset + palette_count ×
+   bytes_per_pixel。行自包含：行首 op 只会是调色盘 op 或 0xFF，RUN 不跨
+   行，无尾部结束码。 */
 typedef struct img2bin_indexqoi_header_s {
   uint16_t width;
   uint16_t height;
-  uint16_t index_interval;
-  uint16_t u16_bytes;
-  uint16_t u24_bytes;
-  uint16_t u32_bytes;
+  uint16_t u16_rows;     /* m16：前 m16 行在 u16 表，其余行在 u32 表 */
   uint8_t palette_count; /* 0..64，0 = 无调色盘 */
-  size_t slot_count;
-  size_t palette_offset; /* = 14 + u16_bytes + u24_bytes + u32_bytes */
+  size_t slot_count;     /* = height（每行一个索引项） */
+  size_t palette_offset; /* = 14 + u16_rows×2 + (height−u16_rows)×4 */
 } img2bin_indexqoi_header_t;
 
 /* 整字节格式返回每像素字节数；亚字节的 Alpha 蒙版（A4/A2/A1）返回 0。 */
@@ -138,7 +140,7 @@ img2bin_decode_status_t img2bin_decode_image(
   size_t output_capacity,
   size_t *out_written);
 
-/* 带通用头的 indexQOI 文件：从第 slot 个索引点解码到图片末尾。 */
+/* 带通用头的 indexQOI 文件：从第 slot 行解码到图片末尾。 */
 img2bin_decode_status_t img2bin_decode_image_from_slot(
   const uint8_t *input,
   size_t input_size,
@@ -232,7 +234,7 @@ img2bin_decode_status_t img2bin_decode_indexqoi(
   size_t output_capacity,
   size_t *out_written);
 
-/* 从第 slot 个索引点开始解码到图片末尾。首像素位置 = slot * index_interval。 */
+/* 从第 slot 行开始逐行经索引解码到图片末尾。首像素位置 = slot × width。 */
 img2bin_decode_status_t img2bin_decode_indexqoi_from_slot(
   const uint8_t *input,
   size_t input_size,

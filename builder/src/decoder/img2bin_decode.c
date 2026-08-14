@@ -597,6 +597,9 @@ img2bin_decode_status_t img2bin_decode_imprle(
   return IMG2BIN_DECODE_OK;
 }
 
+/* row_mode = 1 为 indexQOI V3 行解码：行首 op 限定 调色盘op/0xFF（行自包含），
+   解满 pixel_count 即停、不做尾部多余字节校验，并经 out_consumed 报告本行
+   消耗的输入字节数；row_mode = 0 保持 qoi/qoif 整流语义（须恰好耗尽输入）。 */
 static img2bin_decode_status_t img2bin_decode_qoi_stream(
   const uint8_t *input,
   size_t input_size,
@@ -604,11 +607,13 @@ static img2bin_decode_status_t img2bin_decode_qoi_stream(
   img2bin_decode_endianness_t endianness,
   size_t pixel_count,
   int allow_index,
-  const uint8_t *palette,   /* indexQOI V2 静态调色盘起点；qoi/qoif 传 0 */
+  const uint8_t *palette,   /* indexQOI V3 静态调色盘起点；qoi/qoif 传 0 */
   uint8_t palette_count,    /* 0..64；op < palette_count 时查盘 */
+  int row_mode,
   uint8_t *output,
   size_t output_capacity,
-  size_t *out_written)
+  size_t *out_written,
+  size_t *out_consumed)
 {
   const img2bin_decode_spec_t *spec = img2bin_decode_get_spec(format);
   img2bin_decode_index_entry_t table[64];
@@ -645,6 +650,12 @@ static img2bin_decode_status_t img2bin_decode_qoi_stream(
       return IMG2BIN_DECODE_ERR_TRUNCATED;
     }
     opcode = input[cursor++];
+
+    if (row_mode && produced == 0u &&
+        opcode != 0xFFu && (opcode & 0xC0u) != 0x00u) {
+      /* V3 行首 op 只允许 调色盘 op 或 0xFF 原始全量 */
+      return IMG2BIN_DECODE_ERR_CORRUPT;
+    }
 
     if (opcode == 0xFEu) { /* OP_RGB：颜色原始块，Alpha 不变 */
       if (!spec->supports_rgb_chunk) {
@@ -744,10 +755,13 @@ static img2bin_decode_status_t img2bin_decode_qoi_stream(
     }
   }
 
-  if (cursor != input_size) {
+  if (!row_mode && cursor != input_size) {
     return IMG2BIN_DECODE_ERR_TRAILING_DATA;
   }
 
+  if (out_consumed != 0) {
+    *out_consumed = cursor;
+  }
   *out_written = expected;
   return IMG2BIN_DECODE_OK;
 }
@@ -762,7 +776,7 @@ img2bin_decode_status_t img2bin_decode_qoi(
   size_t output_capacity,
   size_t *out_written)
 {
-  return img2bin_decode_qoi_stream(input, input_size, format, endianness, pixel_count, 1, 0, 0u, output, output_capacity, out_written);
+  return img2bin_decode_qoi_stream(input, input_size, format, endianness, pixel_count, 1, 0, 0u, 0, output, output_capacity, out_written, 0);
 }
 
 img2bin_decode_status_t img2bin_decode_qoif(
@@ -775,7 +789,7 @@ img2bin_decode_status_t img2bin_decode_qoif(
   size_t output_capacity,
   size_t *out_written)
 {
-  return img2bin_decode_qoi_stream(input, input_size, format, endianness, pixel_count, 0, 0, 0u, output, output_capacity, out_written);
+  return img2bin_decode_qoi_stream(input, input_size, format, endianness, pixel_count, 0, 0, 0u, 0, output, output_capacity, out_written, 0);
 }
 
 static int img2bin_decode_format_from_nibble(uint8_t nibble, img2bin_decode_format_t *out_format)
@@ -959,8 +973,7 @@ img2bin_decode_status_t img2bin_decode_indexqoi_header(
   img2bin_indexqoi_header_t *out_header)
 {
   img2bin_indexqoi_header_t header;
-  size_t expected_slots = 0u;
-  size_t pixel_count = 0u;
+  size_t index = 0u;
 
   if (input == 0 || out_header == 0) {
     return IMG2BIN_DECODE_ERR_ARGUMENTS;
@@ -968,38 +981,37 @@ img2bin_decode_status_t img2bin_decode_indexqoi_header(
   if (input_size < 14u) {
     return IMG2BIN_DECODE_ERR_TRUNCATED;
   }
-  /* [0] 头长度兼作版本标识：V2 恒为 0x0E（V1 的 0x0D 视为不支持的旧版本） */
-  if (input[0] != 0x0Eu) {
+  /* [0] 头长度兼作版本标识：V3 恒为 0x0F（V2 的 0x0E、V1 的 0x0D 均不支持） */
+  if (input[0] != 0x0Fu) {
     return IMG2BIN_DECODE_ERR_CORRUPT;
   }
 
   header.width = img2bin_decode_unpack_u16(&input[1], IMG2BIN_DECODE_BIG_ENDIAN);
   header.height = img2bin_decode_unpack_u16(&input[3], IMG2BIN_DECODE_BIG_ENDIAN);
-  header.index_interval = img2bin_decode_unpack_u16(&input[5], IMG2BIN_DECODE_BIG_ENDIAN);
-  header.u16_bytes = img2bin_decode_unpack_u16(&input[7], IMG2BIN_DECODE_BIG_ENDIAN);
-  header.u24_bytes = img2bin_decode_unpack_u16(&input[9], IMG2BIN_DECODE_BIG_ENDIAN);
-  header.u32_bytes = img2bin_decode_unpack_u16(&input[11], IMG2BIN_DECODE_BIG_ENDIAN);
+  header.u16_rows = img2bin_decode_unpack_u16(&input[5], IMG2BIN_DECODE_BIG_ENDIAN);
   header.palette_count = input[13];
 
-  if (header.width == 0u || header.height == 0u || header.index_interval == 0u) {
+  if (header.width == 0u || header.height == 0u) {
     return IMG2BIN_DECODE_ERR_CORRUPT;
   }
-  if (header.u16_bytes % 2u != 0u || header.u24_bytes % 3u != 0u || header.u32_bytes % 4u != 0u) {
+  if ((size_t)header.u16_rows > (size_t)header.height) {
     return IMG2BIN_DECODE_ERR_CORRUPT;
+  }
+  /* [7..12] 保留字节恒 0，出现其他值视为损坏流 */
+  for (index = 7u; index <= 12u; ++index) {
+    if (input[index] != 0u) {
+      return IMG2BIN_DECODE_ERR_CORRUPT;
+    }
   }
   /* 调色盘最多 64 项；超出会与 0x40 起的 DIFF op 空间冲突 */
   if (header.palette_count > 64u) {
     return IMG2BIN_DECODE_ERR_CORRUPT;
   }
 
-  header.slot_count = (size_t)(header.u16_bytes / 2u) + (size_t)(header.u24_bytes / 3u) + (size_t)(header.u32_bytes / 4u);
-  header.palette_offset = 14u + (size_t)header.u16_bytes + (size_t)header.u24_bytes + (size_t)header.u32_bytes;
+  header.slot_count = (size_t)header.height; /* 每行一个索引项 */
+  header.palette_offset = 14u + (size_t)header.u16_rows * 2u +
+                          ((size_t)header.height - (size_t)header.u16_rows) * 4u;
 
-  pixel_count = (size_t)header.width * (size_t)header.height;
-  expected_slots = (pixel_count - 1u) / (size_t)header.index_interval + 1u;
-  if (header.slot_count != expected_slots) {
-    return IMG2BIN_DECODE_ERR_CORRUPT;
-  }
   if (header.palette_offset > input_size) {
     return IMG2BIN_DECODE_ERR_TRUNCATED;
   }
@@ -1016,8 +1028,6 @@ img2bin_decode_status_t img2bin_decode_indexqoi_offset(
 {
   img2bin_indexqoi_header_t header;
   img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
-  size_t u16_count = 0u;
-  size_t u24_count = 0u;
   const uint8_t *entry = 0;
 
   if (out_offset == 0) {
@@ -1032,21 +1042,32 @@ img2bin_decode_status_t img2bin_decode_indexqoi_offset(
     return IMG2BIN_DECODE_ERR_ARGUMENTS;
   }
 
-  u16_count = (size_t)header.u16_bytes / 2u;
-  u24_count = (size_t)header.u24_bytes / 3u;
-
-  if (slot < u16_count) {
+  /* 第 r 行：r < m16 查 u16 表第 r 项，否则查 u32 表第 r−m16 项。 */
+  if (slot < (size_t)header.u16_rows) {
     entry = input + 14u + slot * 2u;
     *out_offset = ((uint32_t)entry[0] << 8) | (uint32_t)entry[1];
-  } else if (slot < u16_count + u24_count) {
-    entry = input + 14u + (size_t)header.u16_bytes + (slot - u16_count) * 3u;
-    *out_offset = ((uint32_t)entry[0] << 16) | ((uint32_t)entry[1] << 8) | (uint32_t)entry[2];
   } else {
-    entry = input + 14u + (size_t)header.u16_bytes + (size_t)header.u24_bytes + (slot - u16_count - u24_count) * 4u;
+    entry = input + 14u + (size_t)header.u16_rows * 2u + (slot - (size_t)header.u16_rows) * 4u;
     *out_offset = ((uint32_t)entry[0] << 24) | ((uint32_t)entry[1] << 16) | ((uint32_t)entry[2] << 8) | (uint32_t)entry[3];
   }
 
   return IMG2BIN_DECODE_OK;
+}
+
+/* 已解析头前提下的行偏移查表（与公开接口同一规则，免去重复解析头）。 */
+static uint32_t img2bin_decode_indexqoi_offset_at(
+  const uint8_t *input,
+  const img2bin_indexqoi_header_t *header,
+  size_t row)
+{
+  const uint8_t *entry = 0;
+
+  if (row < (size_t)header->u16_rows) {
+    entry = input + 14u + row * 2u;
+    return ((uint32_t)entry[0] << 8) | (uint32_t)entry[1];
+  }
+  entry = input + 14u + (size_t)header->u16_rows * 2u + (row - (size_t)header->u16_rows) * 4u;
+  return ((uint32_t)entry[0] << 24) | ((uint32_t)entry[1] << 16) | ((uint32_t)entry[2] << 8) | (uint32_t)entry[3];
 }
 
 /* 计算调色盘尾（= QOI 数据流起点）；亚字节/Alpha 蒙版格式返回 ARGUMENTS。 */
@@ -1072,18 +1093,33 @@ static img2bin_decode_status_t img2bin_decode_indexqoi_stream_start(
   return IMG2BIN_DECODE_OK;
 }
 
-img2bin_decode_status_t img2bin_decode_indexqoi(
+/* 从第 start_row 行起逐行经索引空降解码到最后一行。整图（start_row=0）
+   要求解码覆盖恰好到达数据流末尾（尾部多余字节 = TRAILING_DATA）；
+   行去重使流内偏移不再单调，部分解码（start_row>0）无从校验尾部，跳过。 */
+static img2bin_decode_status_t img2bin_decode_indexqoi_rows(
   const uint8_t *input,
   size_t input_size,
   img2bin_decode_format_t format,
   img2bin_decode_endianness_t endianness,
+  size_t start_row,
   uint8_t *output,
   size_t output_capacity,
   size_t *out_written)
 {
   img2bin_indexqoi_header_t header;
   img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
+  const img2bin_decode_spec_t *spec = 0;
   size_t stream_start = 0u;
+  size_t stream_size = 0u;
+  size_t row_bytes = 0u;
+  size_t expected = 0u;
+  size_t max_end = 0u;
+  size_t row = 0u;
+
+  if (input == 0 || output == 0 || out_written == 0) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
+  *out_written = 0u;
 
   status = img2bin_decode_indexqoi_header(input, input_size, &header);
   if (status != IMG2BIN_DECODE_OK) {
@@ -1093,19 +1129,68 @@ img2bin_decode_status_t img2bin_decode_indexqoi(
   if (status != IMG2BIN_DECODE_OK) {
     return status;
   }
+  if (start_row >= (size_t)header.height) {
+    return IMG2BIN_DECODE_ERR_ARGUMENTS;
+  }
 
-  return img2bin_decode_qoi_stream(
-    input + stream_start,
-    input_size - stream_start,
-    format,
-    endianness,
-    (size_t)header.width * (size_t)header.height,
-    0,
-    input + header.palette_offset,
-    header.palette_count,
-    output,
-    output_capacity,
-    out_written);
+  spec = img2bin_decode_get_spec(format);
+  status = img2bin_decode_check_output(
+    spec, (size_t)header.width * ((size_t)header.height - start_row), output_capacity, &expected);
+  if (status != IMG2BIN_DECODE_OK) {
+    return status;
+  }
+
+  stream_size = input_size - stream_start;
+  row_bytes = (size_t)header.width * spec->bytes_per_pixel;
+
+  for (row = start_row; row < (size_t)header.height; ++row) {
+    uint32_t offset = img2bin_decode_indexqoi_offset_at(input, &header, row);
+    size_t row_written = 0u;
+    size_t row_consumed = 0u;
+
+    if ((size_t)offset > stream_size) {
+      return IMG2BIN_DECODE_ERR_CORRUPT;
+    }
+    status = img2bin_decode_qoi_stream(
+      input + stream_start + offset,
+      stream_size - (size_t)offset,
+      format,
+      endianness,
+      (size_t)header.width,
+      0,
+      input + header.palette_offset,
+      header.palette_count,
+      1,
+      output + (row - start_row) * row_bytes,
+      output_capacity - (row - start_row) * row_bytes,
+      &row_written,
+      &row_consumed);
+    if (status != IMG2BIN_DECODE_OK) {
+      return status;
+    }
+    if ((size_t)offset + row_consumed > max_end) {
+      max_end = (size_t)offset + row_consumed;
+    }
+  }
+
+  if (start_row == 0u && max_end != stream_size) {
+    return IMG2BIN_DECODE_ERR_TRAILING_DATA;
+  }
+
+  *out_written = expected;
+  return IMG2BIN_DECODE_OK;
+}
+
+img2bin_decode_status_t img2bin_decode_indexqoi(
+  const uint8_t *input,
+  size_t input_size,
+  img2bin_decode_format_t format,
+  img2bin_decode_endianness_t endianness,
+  uint8_t *output,
+  size_t output_capacity,
+  size_t *out_written)
+{
+  return img2bin_decode_indexqoi_rows(input, input_size, format, endianness, 0u, output, output_capacity, out_written);
 }
 
 img2bin_decode_status_t img2bin_decode_indexqoi_from_slot(
@@ -1118,50 +1203,7 @@ img2bin_decode_status_t img2bin_decode_indexqoi_from_slot(
   size_t output_capacity,
   size_t *out_written)
 {
-  img2bin_indexqoi_header_t header;
-  img2bin_decode_status_t status = IMG2BIN_DECODE_OK;
-  uint32_t offset = 0u;
-  size_t pixel_count = 0u;
-  size_t base_pixel = 0u;
-  size_t stream_start = 0u;
-  size_t stream_size = 0u;
-
-  status = img2bin_decode_indexqoi_header(input, input_size, &header);
-  if (status != IMG2BIN_DECODE_OK) {
-    return status;
-  }
-  status = img2bin_decode_indexqoi_stream_start(&header, format, input_size, &stream_start);
-  if (status != IMG2BIN_DECODE_OK) {
-    return status;
-  }
-  status = img2bin_decode_indexqoi_offset(input, input_size, slot, &offset);
-  if (status != IMG2BIN_DECODE_OK) {
-    return status;
-  }
-
-  pixel_count = (size_t)header.width * (size_t)header.height;
-  base_pixel = slot * (size_t)header.index_interval;
-  if (base_pixel >= pixel_count) {
-    return IMG2BIN_DECODE_ERR_CORRUPT;
-  }
-
-  stream_size = input_size - stream_start;
-  if ((size_t)offset > stream_size) {
-    return IMG2BIN_DECODE_ERR_CORRUPT;
-  }
-
-  return img2bin_decode_qoi_stream(
-    input + stream_start + offset,
-    stream_size - offset,
-    format,
-    endianness,
-    pixel_count - base_pixel,
-    0,
-    input + header.palette_offset,
-    header.palette_count,
-    output,
-    output_capacity,
-    out_written);
+  return img2bin_decode_indexqoi_rows(input, input_size, format, endianness, slot, output, output_capacity, out_written);
 }
 
 /* =====================  indexQOI_MASK（算法 0x6，仅 A8）  =====================

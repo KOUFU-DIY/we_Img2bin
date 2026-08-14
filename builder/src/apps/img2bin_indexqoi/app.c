@@ -14,18 +14,13 @@ static int img2bin_indexqoi_encode_adapter(
   char *error_buffer,
   size_t error_buffer_size)
 {
-  unsigned int index_interval = 0u;
-
-  if (options != NULL && options->index_interval_specified) {
-    index_interval = options->index_interval;
-  }
+  (void)options; /* V3 固定按行索引，无间隔参数 */
 
   return img2bin_encode_indexqoi_image(
     format,
     endianness,
     background,
     image,
-    index_interval,
     out_buffer,
     out_size,
     error_buffer,
@@ -38,8 +33,8 @@ static const img2bin_tool_descriptor_t g_img2bin_indexqoi_tool = {
   "indexed qoi image converter",
   "索引QOI取模",
   "Indexed QOI Image Converter",
-  "输出带像素索引表与静态调色盘的索引QOI V2压缩像素格式 bin 文件。",
-  "Export bin files in indexed QOI V2 with a static palette and jump index.",
+  "输出带行索引表、行去重与静态调色盘的索引QOI V3压缩像素格式 bin 文件。",
+  "Export bin files in indexed QOI V3 with a static palette, per-row jump index and row dedup.",
   "QOI压缩",
   "QOI Compression",
   60,
@@ -48,7 +43,7 @@ static const img2bin_tool_descriptor_t g_img2bin_indexqoi_tool = {
   "indexed_qoi",
   "indexqoi",
   "img2bin_indexqoi-manifest.json",
-  1,
+  0,
   0,
   0,
   0,

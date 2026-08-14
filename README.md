@@ -1,16 +1,17 @@
 # img2bin 用户入口
 
 面向嵌入式图片资源取模的工具集：把 `PNG/BMP/JPG/JPEG` 转换成下位机可直接使用的纯 `.bin`
-像素数据（输出 = 6 字节通用资源头 + 算法 payload）。六个 CLI，每个对应一种编码算法：
+像素数据（输出 = 6 字节通用资源头 + 算法 payload）。七个 CLI，每个对应一种编码算法：
 
 | 工具 | 算法 | 特点 |
 | --- | --- | --- |
-| `img2bin_raw` | 无压缩 | 可 O(1) 随机寻址；唯一支持 Alpha 蒙版 `a8/a4/a2/a1` |
+| `img2bin_raw` | 无压缩 | 可 O(1) 随机寻址；唯一支持全部 Alpha 蒙版 `a8/a4/a2/a1` |
 | `img2bin_imprle` | 改进 RLE | 重复段 + 原样段，杂色区不膨胀 |
 | `img2bin_rle` | 原始 RLE | 结构最简单，解码最容易 |
 | `img2bin_qoi` | 原始 QOI | 带 64 项哈希字典，压缩率通常最好 |
 | `img2bin_qoif` | QOI 无字典 | 解码零字典 RAM、零哈希 |
-| `img2bin_indexqoi` | 索引 QOI V2 | 静态调色盘 + 跳转索引，可从任意索引点空降解码 |
+| `img2bin_indexqoi` | 索引 QOI V3 | 静态调色盘 + 行索引 + 行去重，可从任意行空降解码 |
+| `img2bin_indexqoimask` | 索引 QOI_MASK | `a8` 蒙版专用压缩，按行随机访问 + 可选 5/6/7/8 bit 量化 |
 
 ## 下载
 
@@ -33,7 +34,8 @@ C99 参考解码器源码（`decoder/`）和完整用户文档（`docs/user/`）
 .\img2bin_raw.exe --format rgb565
 .\img2bin_raw.exe --format a4
 .\img2bin_imprle.exe --format argb8888
-.\img2bin_indexqoi.exe --format argb8888 --index-interval 512
+.\img2bin_indexqoi.exe --format argb8888
+.\img2bin_indexqoimask.exe --quantize-bits 8
 ```
 
 双击运行时，工具读取可执行文件同目录的 `input` 文件夹、输出到同目录的 `output` 文件夹
@@ -50,7 +52,8 @@ C99 参考解码器源码（`decoder/`）和完整用户文档（`docs/user/`）
   [rle](docs/user/README-img2bin_rle.md) ·
   [qoi](docs/user/README-img2bin_qoi.md) ·
   [qoif](docs/user/README-img2bin_qoif.md) ·
-  [indexqoi](docs/user/README-img2bin_indexqoi.md)
+  [indexqoi](docs/user/README-img2bin_indexqoi.md) ·
+  [indexqoimask](docs/user/README-img2bin_indexqoimask.md)
 - [像素格式说明](docs/user/README-formats.md)
 - [解码编写说明](docs/user/README-decoder.md)
 - [协议与验证说明](docs/user/README-protocol.md)
@@ -62,16 +65,17 @@ C99 参考解码器源码（`decoder/`）和完整用户文档（`docs/user/`）
 ## 参考解码器
 
 [builder/src/decoder/](builder/src/decoder/) 提供纯 C99、零依赖、不用动态内存的参考解码器
-`img2bin_decode.c/.h`（发布包里在 `decoder/` 目录），覆盖全部六种算法 × 九种彩色像素格式 × 大小端，
-外加 Alpha 蒙版格式（`A8/A4/A2/A1`，仅 raw 算法）与 indexQOI V2（静态调色盘）跳转解码接口。
+`img2bin_decode.c/.h`（发布包里在 `decoder/` 目录），覆盖六种彩色算法 × 九种彩色像素格式 × 大小端，
+外加 Alpha 蒙版格式（`A8/A4/A2/A1`，raw 算法）、indexQOI V3（行索引 + 行去重）跳转解码接口，
+以及 indexQOI_MASK（`a8` 蒙版压缩）的头解析/整图/单行/行偏移解码接口。
 测试套件对每种组合做“编码 → 解码 → 与 RAW 逐字节比对”回环验证。
 
 ## 当前支持
 
 - 输入格式：`PNG`、`BMP`、`JPG`、`JPEG`
-- 彩色像素格式（六工具通用）：`ARGB8888`、`ARGB6666`、`ARGB4444`、`ARGB2222`、`ARGB8565`、`RGB888`、`RGB565`、`RGB332`、`RAGB5155`
-- Alpha 蒙版格式（仅 `img2bin_raw`）：`A8`、`A4`、`A2`、`A1`
-- 默认行为：`RGB565`、大端、`<exe_dir>/input` → `<exe_dir>/output`
+- 彩色像素格式（六个彩色工具通用）：`ARGB8888`、`ARGB6666`、`ARGB4444`、`ARGB2222`、`ARGB8565`、`RGB888`、`RGB565`、`RGB332`、`RAGB5155`
+- Alpha 蒙版格式：`A8`、`A4`、`A2`、`A1`（`img2bin_raw` 无压缩全支持；`A8` 另可用 `img2bin_indexqoimask` 压缩）
+- 默认行为：`RGB565`、大端、`<exe_dir>/input` → `<exe_dir>/output`（`img2bin_indexqoimask` 例外：默认且仅支持 `A8`，量化默认 6 bit）
 
 ## 协议与验证
 

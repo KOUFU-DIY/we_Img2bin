@@ -9,7 +9,7 @@
 | `img2bin_rle.exe` | 原始 RLE（纯重复段） | [README-img2bin_rle.md](README-img2bin_rle.md) |
 | `img2bin_qoi.exe` | 原始 QOI（64 项字典，压缩率通常最好） | [README-img2bin_qoi.md](README-img2bin_qoi.md) |
 | `img2bin_qoif.exe` | 原始 QOI 无字典（解码最简单） | [README-img2bin_qoif.md](README-img2bin_qoif.md) |
-| `img2bin_indexqoi.exe` | 索引 QOI V2（静态调色盘 + 跳转索引） | [README-img2bin_indexqoi.md](README-img2bin_indexqoi.md) |
+| `img2bin_indexqoi.exe` | 索引 QOI V3（静态调色盘 + 行索引 + 行去重） | [README-img2bin_indexqoi.md](README-img2bin_indexqoi.md) |
 | `img2bin_indexqoimask.exe` | 索引 QOI_MASK（`a8` 蒙版专用，按行随机访问 + 可选量化） | [README-img2bin_indexqoimask.md](README-img2bin_indexqoimask.md) |
 
 如果你要根据本工具生成的 `.bin` 自己编写解码器，请优先阅读：
@@ -34,7 +34,7 @@
 - `--info`
 - `--list-formats`
 
-工具专属参数：`img2bin_indexqoi` 另有 `--index-interval`；`img2bin_indexqoimask` 另有 `--quantize-bits`。
+工具专属参数：`img2bin_indexqoimask` 另有 `--quantize-bits`（`img2bin_indexqoi` V3 起固定按行索引，不再有 `--index-interval`）。
 
 共同默认值：
 
@@ -66,7 +66,7 @@ Wrote out\logo_rgb565_indexqoi_be_128x64.bin (1290 bytes, payload 1284 / raw 163
 - **大块纯色为主** → `rle`（解码最简单）或 `imprle`（杂色不膨胀）
 - **追求压缩率、解码端能给 64 项字典 RAM** → `qoi`
 - **要最简单的 QOI 系解码器** → `qoif`
-- **要局部跳转解码（按行/按区域刷屏）+ 高压缩率** → `indexqoi`（V2 静态调色盘）
+- **要局部跳转解码（按行/按区域刷屏）+ 高压缩率** → `indexqoi`（V3：静态调色盘 + 行索引 + 行去重）
 - **`a8` 蒙版要压缩 + 按行随机访问（PFB 逐切片渲染）** → `indexqoimask`（可选 5/6/7/8 bit 量化）
 
 工具专属参数、payload 布局与完整示例见各工具的单独文档（页首表格）。

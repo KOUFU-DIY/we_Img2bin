@@ -37,7 +37,7 @@
 | `defaults.endianness` | string | `big` 或 `little` |
 | `defaults.input_dir` / `defaults.output_dir` | string | `exe_dir/input`、`exe_dir/output` |
 | `defaults.background_color` | string | `RRGGBB`，默认 `000000` |
-| `defaults.index_interval` | string | 仅索引类工具存在，值 `image_width` |
+| `defaults.index_interval` | string | 仅 `supports_index_interval` 为 true 的工具存在（indexQOI V3 起固定按行索引，当前没有工具携带此字段） |
 | `defaults.quantize_bits` | number | 仅支持 `--quantize-bits` 的工具存在（1.4.0 起），值 `6` |
 | `capabilities.*` | bool/array/string | 能力开关，字段名自描述；集成方可用 `supports_index_interval` / `supports_quantize_bits` 判断是否可传 `--index-interval` / `--quantize-bits` |
 | `invocation.style` | string | 固定 `flag_cli` |
